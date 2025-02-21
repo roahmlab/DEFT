@@ -63,14 +63,13 @@ links:
 
 # Abstract
 
-This paper addresses the task of modeling Deformable Linear Objects (DLOs), such as ropes and cables, during dynamic motion over long time horizons.
-This task presents significant challenges due to the complex dynamics of DLOs.
-To address these challenges, this paper proposes differentiable Discrete Elastic Rods For deformable linear Objects with Real-time Modeling (DEFORM), 
-a novel framework that combines a differentiable physics-based model with a learning framework to model DLOs accurately and in real-time. 
-The performance of DEFORM is evaluated in an experimental setup involving two industrial robots and a variety of sensors.
-A comprehensive series of experiments demonstrate the efficacy of DEFORM in terms of accuracy, computational speed, and generalizability when compared to state-of-the-art alternatives.
-To further demonstrate the utility of DEFORM, this paper integrates it into a perception pipeline and illustrates its superior performance when compared to the state-of-the-art methods while tracking a DLO even in the presence of occlusions. 
-Finally, this paper illustrates the superior performance of DEFORM when compared to state-of-the-art methods when it is applied to perform autonomous planning and control of DLOs.
+Autonomous wire harness assembly requires robots to manipulate complex branched cables with high precision and reliability.
+A key challenge in automating this process is predicting how these flexible and branched structures behave under manipulation.
+Without accurate predictions, it is difficult for robots to reliably plan or execute assembly operations.
+While existing research has made progress in modeling single-threaded Deformable Linear Objects (DLOs), extending these approaches to Branched Deformable Linear Objects (BDLOs) presents fundamental challenges. 
+The junction points in BDLOs create complex force interactions and strain propagation patterns that cannot be adequately captured by simply connecting multiple single-DLO models.
+To address these challenges, this paper presents Differentiable discrete branched Elastic rods for modeling Furcated DLOs in real-Time (DEFT), a novel framework that combines a differentiable physics-based model with a learning framework to: 1) accurately model BDLO dynamics, including dynamic propagation at junction points and grasping in the middle of a BDLO, 2) achieve efficient computation for real-time inference, and 3) enable planning to demonstrate dexterous BDLO manipulation.
+A comprehensive series of real-world experiments demonstrates DEFT's efficacy in terms of accuracy, computational speed, and generalizability compared to state-of-the-art alternatives. 
 <p align="center">
   <img src="https://raw.githubusercontent.com/yich7045/DEFORM/main/web_elements/DEFORM_model.jpg" class="img-responsive" alt="DEFORM model" style="width: 100%; height: auto;">
 
