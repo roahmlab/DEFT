@@ -97,7 +97,7 @@ Inextensibility constraints are applied to each branch, while junction-level con
 Additionally, edge orientation constraints enable the propagation of dynamics across these junctions.
 Throughout the entire pipeline, all components remain fully differentiable, allowing for efficient parameter learning from real-world data.
 <p align="center">
-  <img src="https://raw.githubusercontent.com/yich7045/DEFORM/main/web_elements/DEFORM_Overview.png" class="img-responsive" alt="DEFORM overview" style="width: 100%; height: auto;">
+  <img src="https://raw.githubusercontent.com/yich7045/DEFORM/DEFT/web_elements/DEFT_algorithm.png" class="img-responsive" alt="DEFORM overview" style="width: 100%; height: auto;">
 </p>
 </div>
 
