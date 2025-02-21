@@ -4,7 +4,7 @@ layout: default
 title:  "DEFT"
 date:   2024-02-21 
 description: >- # Supports markdown
-  DEFT: **D**ifferentiable Discrete **E**lastic Rods **F**or Deformable Linear **O**bjects with **R**eal-time **M**odeling
+  DEFT: **D**ifferentiable Branched Discrete **E**lastic Rods for Modeling **F**urcated DLOs in Real-**T**ime
 show-description: true
 
 # Add page-specific mathjax functionality. Manage global setting in _config.yml
