@@ -17,7 +17,7 @@ autoanchor: false
 image:
   path: https://raw.githubusercontent.com/yich7045/DEFORM/DEFT/web_elements/demo_image.png
   height: 120
-  width: 300
+  width: 340
   alt: Random Landscape
   
 authors:
