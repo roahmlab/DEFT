@@ -83,10 +83,10 @@ The figures above illustrate how DEFT can be used to autonomously perform a wire
 
 
 # Method
+<div markdown="1" class="content-block grey justify no-pre">
 <p align="center">
   <img src="https://raw.githubusercontent.com/yich7045/DEFORM/DEFT/web_elements/DEFT_algorithm.png" class="img-responsive" alt="DEFORM overview" style="width: 120%; height: auto;">
 </p>
-<div markdown="1" class="content-block grey justify no-pre">
 Algorithm Overview of DEFT.
 In the initialization stage, DEFT begins by separating the BDLO into a parent DLO and one or more children DLOs. 
 Each DLO is discretized into vertices and represented as elastic rods. 
