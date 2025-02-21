@@ -2,9 +2,10 @@
 # Front matter. This is where you specify a lot of page variables.
 layout: default
 title:  "DEFT"
-date:   2023-06-16 03:03:01 -0400
+date:   2024-02-21 
 description: >- # Supports markdown
-  **D**ifferentiable Discrete **E**lastic Rods **F**or Deformable Linear **O**bjects with **R**eal-time **M**odeling
+DEFT: **D**ifferentiable Branched Discrete **E**lastic
+Rods for Modeling **F**urcated DLOs in Real-**T**ime
 show-description: true
 
 # Add page-specific mathjax functionality. Manage global setting in _config.yml
