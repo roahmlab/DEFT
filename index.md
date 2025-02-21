@@ -89,10 +89,10 @@ In the initialization stage, DEFT begins by separating the BDLO into a parent DL
 Each DLO is discretized into vertices and represented as elastic rods. 
 This setup allows DEFT to capture the geometric and physical properties required for dynamic simulation.
 To improve computational efficiency, DEFT then predicts the dynamics of each branch in parallel. 
-During this process, analytical gradients are provided to solve \eqref{eq:innerloop}, as detailed in Section \ref{section:gradientopt}, ensuring efficient and stable convergence.
-Next, to address numerical errors, DEFT employs a GNN designed to learn the BDLO’s residual dynamics (Section \ref{section:residual learning}). 
+During this process, analytical gradients are provided to minimize potential energy, ensuring efficient and stable convergence.
+Next, to address numerical errors, DEFT employs a GNN designed to learn the BDLO’s residual dynamics. 
 By modeling discrepancies between simulated and observed behavior, the GNN refines predictions and enhances overall accuracy.
-After integration, DEFT enforces constraints (Section \ref{section:constratins}) to enforce physical realism.
+After integration, DEFT enforces constraints to enforce physical realism.
 Inextensibility constraints are applied to each branch, while junction-level constraints ensure proper attachment at branch junctions. 
 Additionally, edge orientation constraints enable the propagation of dynamics across these junctions.
 Throughout the entire pipeline, all components remain fully differentiable, allowing for efficient parameter learning from real-world data.
