@@ -71,7 +71,7 @@ The junction points in BDLOs create complex force interactions and strain propag
 To address these challenges, this paper presents Differentiable discrete branched Elastic rods for modeling Furcated DLOs in real-Time (DEFT), a novel framework that combines a differentiable physics-based model with a learning framework to: 1) accurately model BDLO dynamics, including dynamic propagation at junction points and grasping in the middle of a BDLO, 2) achieve efficient computation for real-time inference, and 3) enable planning to demonstrate dexterous BDLO manipulation.
 A comprehensive series of real-world experiments demonstrates DEFT's efficacy in terms of accuracy, computational speed, and generalizability compared to state-of-the-art alternatives. 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/yich7045/DEFORM/blob/DEFT/web_elements/demo_image.png" class="img-responsive" alt="DEFORM model" style="width: 100%; height: auto;">
+  <img src="https://raw.githubusercontent.com/yich7045/DEFORM/DEFT/web_elements/demo_image.png" class="img-responsive" alt="DEFORM model" style="width: 100%; height: auto;">
 
 </p>
 The figure shows DEFORM's predicted states (yellow) and the actual states (red) for a DLO over 4.5 seconds at 100 Hz. Note that the prediction is performed recursively, without requiring access to ground truth or perception during the process.
