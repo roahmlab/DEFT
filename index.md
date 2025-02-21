@@ -117,7 +117,9 @@ Throughout the entire pipeline, all components remain fully differentiable, allo
 </div>
 
 <div markdown="1" class="content-block grey justify">
+  
 ---
+
 # [Citation](#citation)
 
 This project was developed in [Robotics and Optimization for Analysis of Human Motion (ROAHM) Lab](http://www.roahmlab.com/) at University of Michigan - Ann Arbor.
