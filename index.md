@@ -103,6 +103,21 @@ Throughout the entire pipeline, all components remain fully differentiable, allo
 
 ---
 
+## Modeling Results Visualization
+<p align="center">
+    <img src="https://raw.githubusercontent.com/yich7045/DEFORM/DEFT/web_elements/modeling_demo.png" class="img-responsive" alt="DEFORM overview" style="width: 140%; height: auto;">
+</p>
+<p align="center">
+    <img src="https://raw.githubusercontent.com/yich7045/DEFORM/DEFT/web_elements/modeling_demo2.png" class="img-responsive" alt="DEFORM overview" style="width: 140%; height: auto;">
+</p>
+Visualization of the predicted trajectories for BDLO 1 under two manipulation scenarios, using DEFT, a DEFT ablation that leaves out the constraint described in Theorem 4, and Tree-LSTM. The ground-truth initial position of the vertices are colored in blue, the ground-truth final position of the vertices are colored in pink, and the gradient between these two colors is used to denote the ground truth location over time. 
+The predicted vertices are colored as green circles (DEFT), orange circles (DEFT ablation), and light red circles (Tree-LSTM), respectively.
+A gradient is used for these predictions to depict the evolution of time, starting from dark and going to light.
+Note that the ground truth is only provided at t=0s and prediction is constructed until t=8s.
+The prediction is performed recursively, without requiring additional ground-truth data or perception inputs throughout the entire process.
+
+---
+
 # Dataset
 - For each BDLO, dynamic trajectory data is captured in real-world settings using a motion capture system operating at 100 Hz when robots grasp the BDLO’s ends. For details on dataset usage, please refer to DEFT_train.py.
 - For BDLO 1 and BDLO 3, we record dynamic trajectory data when one robot grasps the middle of the BDLO while the other robot grasps one of its ends.
