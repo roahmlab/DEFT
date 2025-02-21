@@ -84,6 +84,10 @@ The figures above illustrate how DEFT can be used to autonomously perform a wire
 
 # Method
 <div markdown="1" class="content-block grey justify no-pre">
+<p align="center">
+  <img src="https://raw.githubusercontent.com/yich7045/DEFORM/DEFT/web_elements/DEFT_algorithm.png" class="img-responsive" alt="DEFORM overview" style="width: 100%; height: auto;">
+</p>
+</div>
 Algorithm Overview of DEFT.
 In the initialization stage, DEFT begins by separating the BDLO into a parent DLO and one or more children DLOs. 
 Each DLO is discretized into vertices and represented as elastic rods. 
@@ -96,11 +100,6 @@ After integration, DEFT enforces constraints to enforce physical realism.
 Inextensibility constraints are applied to each branch, while junction-level constraints ensure proper attachment at branch junctions. 
 Additionally, edge orientation constraints enable the propagation of dynamics across these junctions.
 Throughout the entire pipeline, all components remain fully differentiable, allowing for efficient parameter learning from real-world data.
-<p align="center">
-  <img src="https://raw.githubusercontent.com/yich7045/DEFORM/DEFT/web_elements/DEFT_algorithm.png" class="img-responsive" alt="DEFORM overview" style="width: 100%; height: auto;">
-</p>
-</div>
-
 ---
 
 # Dataset
