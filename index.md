@@ -84,12 +84,18 @@ The figures above illustrate how DEFT can be used to autonomously perform a wire
 
 # Method
 <div markdown="1" class="content-block grey justify no-pre">
-DEFORM introduces a novel differentiable simulator as a physics prior for physics-informed learning to model DLOs in the real world. 
-The following figure demonstrates the overview of DEFORM. Contributions of DEFORM are highlighted in green. 
-a) DER models discretize DLOs into vertices, segment them into elastic rods, and model their dynamic propagation. 
-DEFORM reformulates Discrete Elastic Rods(DER) into Differentiable DER (DDER) which describes how to compute gradients from the prediction loss, enabling efficient system identification and incorporation into deep learning pipelines.
-b) To compensate for the error from DER's numerical integration, DEFORM introduces residual learning via DNNs.
-c) 1 &rarr; 2: DER enforces inextensibility, but this does not satisfy classical conservation principles.  1 &rarr; 3: DEFORM enforces inextensibility with momentum conservation, which allows dynamic modeling while maintaining simulation stability.
+Algorithm Overview of DEFT.
+In the initialization stage, DEFT begins by separating the BDLO into a parent DLO and one or more children DLOs. 
+Each DLO is discretized into vertices and represented as elastic rods. 
+This setup allows DEFT to capture the geometric and physical properties required for dynamic simulation.
+To improve computational efficiency, DEFT then predicts the dynamics of each branch in parallel. 
+During this process, analytical gradients are provided to solve \eqref{eq:innerloop}, as detailed in Section \ref{section:gradientopt}, ensuring efficient and stable convergence.
+Next, to address numerical errors, DEFT employs a GNN designed to learn the BDLO’s residual dynamics (Section \ref{section:residual learning}). 
+By modeling discrepancies between simulated and observed behavior, the GNN refines predictions and enhances overall accuracy.
+After integration, DEFT enforces constraints (Section \ref{section:constratins}) to enforce physical realism.
+Inextensibility constraints are applied to each branch, while junction-level constraints ensure proper attachment at branch junctions. 
+Additionally, edge orientation constraints enable the propagation of dynamics across these junctions.
+Throughout the entire pipeline, all components remain fully differentiable, allowing for efficient parameter learning from real-world data.
 <p align="center">
   <img src="https://raw.githubusercontent.com/yich7045/DEFORM/main/web_elements/DEFORM_Overview.png" class="img-responsive" alt="DEFORM overview" style="width: 100%; height: auto;">
 </p>
