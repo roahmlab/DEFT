@@ -103,10 +103,8 @@ Throughout the entire pipeline, all components remain fully differentiable, allo
 ---
 
 # Dataset
-<div markdown="1" class="content-block grey justify no-pre">
-For each DLO, we collect 350 seconds of dynamic trajectory data in the real-world using the motion capture system at a frequency of 100 Hz. For dataset usage, please refer to train_DEFORM.py in [here](https://github.com/roahmlab/DEFORM).
-</div>
-
+- For each BDLO, dynamic trajectory data is captured in real-world settings using a motion capture system operating at 100 Hz when robots grasp the BDLO’s ends. For details on dataset usage, please refer to DEFT_train.py.
+- For BDLO 1 and BDLO 3, we record dynamic trajectory data when one robot grasps the middle of the BDLO while the other robot grasps one of its ends.
 ---
 
 # Demo Video
