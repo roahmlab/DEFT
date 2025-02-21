@@ -15,7 +15,7 @@ autoanchor: false
 
 # Preview image for social media cards
 image:
-  path: https://raw.githubusercontent.com/yich7045/DEFORM/blob/DEFT/web_elements/demo_image.png
+  path: https://raw.githubusercontent.com/yich7045/DEFORM/DEFT/web_elements/demo_image.png
   height: 100
   width: 256
   alt: Random Landscape
