@@ -103,7 +103,7 @@ Throughout the entire pipeline, all components remain fully differentiable, allo
 
 ---
 
-## Modeling Results Visualization
+# Modeling Results Visualization
 <p align="center">
     <img src="https://raw.githubusercontent.com/yich7045/DEFORM/DEFT/web_elements/modeling_demo.png" class="img-responsive" alt="DEFORM overview" style="width: 140%; height: auto;">
 </p>
