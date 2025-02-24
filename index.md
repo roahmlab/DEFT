@@ -2,7 +2,7 @@
 # Front matter. This is where you specify a lot of page variables.
 layout: default
 title:  "DEFT"
-date:   2024-02-21 
+date:   2025-02-21 
 description: >- # Supports markdown
   DEFT: **D**ifferentiable Branched Discrete **E**lastic Rods for Modeling **F**urcated DLOs in Real-**T**ime
 show-description: true
