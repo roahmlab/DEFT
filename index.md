@@ -140,14 +140,11 @@ The prediction is performed recursively, without requiring additional ground-tru
 This project was developed in [Robotics and Optimization for Analysis of Human Motion (ROAHM) Lab](http://www.roahmlab.com/) at University of Michigan - Ann Arbor.
 
 ```bibtex
-@misc{chen2025deftdifferentiablebrancheddiscrete,
+@article{chen2025deftdifferentiablebrancheddiscrete,
       title={DEFT: Differentiable Branched Discrete Elastic Rods for Modeling Furcated DLOs in Real-Time}, 
       author={Yizhou Chen and Xiaoyue Wu and Yeheng Zong and Anran Li and Yuzhen Chen and Julie Wu and Bohao Zhang and Ram Vasudevan},
-      year={2025},
-      eprint={2502.15037},
-      archivePrefix={arXiv},
-      primaryClass={cs.RO},
-      url={https://arxiv.org/abs/2502.15037}, 
+      journal={https://arxiv.org/abs/2502.15037},
+      year={2025}
 }
 ```
 </div>
