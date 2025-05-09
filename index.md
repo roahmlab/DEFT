@@ -140,7 +140,7 @@ This project was developed in [Robotics and Optimization for Analysis of Human M
 ```bibtex
 @article{chen2025deft,
   title={DEFT: Differentiable Branched Discrete Elastic Rods for Modeling Furcated DLOs in Real-Time},
-  author={Chen, Yizhou and Wu, Xiaoyue and Zong, Yeheng and Li, Anran and Chen, Yuzhen and Wu, Julie and Zhang, Bohao and Vasudevan, Ram},
+  author={Chen, Yizhou and Wu, Xiaoyue and Zong, Yeheng and Chen, Yuzhen and Li, Anran and Zhang, Bohao and Vasudevan, Ram},
   journal={arXiv preprint arXiv:2502.15037},
   year={2025}
 }
