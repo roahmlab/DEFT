@@ -27,12 +27,10 @@ authors:
     email: wxyluna@umich.edu
   - name: Yeheng Zong
     email: yehengz@umich.edu
-  - name: Anran Li
-    email: anranli@umich.edu
   - name: Yuzhen Chen
     email: yuzhench@umich.edu
-  - name: Julie Wu
-    email: jwuxx@umich.edu
+  - name: Anran Li
+    email: anranli@umich.edu
   - name: Bohao Zhang
     email: jimzhang@umich.edu
   - name: Ram Vasudevan
