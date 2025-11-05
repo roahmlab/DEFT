@@ -961,7 +961,7 @@ class Train_DEFTData(Dataset):
                  rigid_body_coupling_index, train_set_number, total_time, training_time_horizon, device):
         super(Train_DEFTData, self).__init__()
         # Root directory containing data
-        self.root_dir = "dataset/BDLO%s/train/" % BDLO_type
+        self.root_dir = "../dataset/BDLO%s/train/" % BDLO_type
         file_list = glob.glob(self.root_dir + "*")
         self.device = device
 
@@ -1050,7 +1050,7 @@ class Eval_DEFTData(Dataset):
                  rigid_body_coupling_index, eval_set_number, total_time, eval_time_horizon, device):
         super(Eval_DEFTData, self).__init__()
         # Root directory for evaluation data
-        self.root_dir = "dataset/BDLO%s/eval/" % BDLO_type
+        self.root_dir = "../dataset/BDLO%s/eval/" % BDLO_type
         file_list = glob.glob(self.root_dir + "*")
         self.device = device
 

@@ -8,7 +8,7 @@ import numpy as np
 from fontTools.misc.psOperators import PSOperators
 from sympy.codegen import Print
 
-from util import visualize_tensors_3d_in_same_plot_no_zeros
+from ..utils.util import visualize_tensors_3d_in_same_plot_no_zeros
 np.set_printoptions(threshold=np.inf)
 
 # 2. Define the model (same as before)

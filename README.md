@@ -32,11 +32,61 @@ A gradient is used for these predictions to depict the evolution of time, starti
 Note that the ground truth is only provided at t=0s and prediction is constructed until t=8s.
 The prediction is performed recursively, without requiring additional ground-truth data or perception inputs throughout the entire process.
 
-## Dependency 
-Run `pip install -r requirements.txt` to collect all python dependencies.
+## Dependencies
+The main dependencies are listed in `requirements.txt`. Install them using:
+```bash
+pip install -r requirements.txt
+```
+
+Key dependencies include:
+- PyTorch (2.5.1+)
+- NumPy
+- Numba
+- PyTorch3D
+- Theseus-AI
+- Matplotlib
+- Pandas
+
+## Installation
+
+### From Source
+```bash
+git clone https://github.com/roahmlab/DEFT.git
+cd DEFT
+pip install -e .
+```
+
+### Using Conda Environment
+```bash
+conda create -n DEFT python=3.11
+conda activate DEFT
+pip install -r requirements.txt
+pip install -e .
+```
+
+## Project Structure
+```
+DEFT/
+├── deft/                    # Main package
+│   ├── core/               # Core simulation modules
+│   ├── models/             # Neural network models
+│   ├── solvers/            # Constraint and theta solvers
+│   └── utils/              # Utility functions
+├── scripts/                # Training and analysis scripts
+├── examples/               # Example usage and demos
+├── tests/                  # Unit tests
+├── docs/                   # Documentation
+├── assets/                 # Images and media
+├── dataset/                # Training and evaluation data
+├── save_model/             # Saved model checkpoints
+└── training_record/        # Training logs and records
+```
 
 ## Train DEFT Models
-Example: To train a DEFT model using the BDLO1 dataset with end-effectors that grasp the BDLO's ends, run the following command: python DEFT_train.py --BDLO_type="1" --clamp_type="ends"
+Example: To train a DEFT model using the BDLO1 dataset with end-effectors that grasp the BDLO's ends, run the following command:
+```bash
+python scripts/DEFT_train.py --BDLO_type="1" --clamp_type="ends"
+```
 
 ## Dataset
 - For each BDLO, dynamic trajectory data is captured in real-world settings using a motion capture system operating at 100 Hz when robots grasp the BDLO’s ends. For details on dataset usage, please refer to DEFT_train.py.

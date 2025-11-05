@@ -783,7 +783,7 @@ class constraints_enforcement_numba(nn.Module):
         nl_np = nominal_length
         sc_np = scale
         ms_np = mass_scale
-        zm_np = zero_mask_num.detach().cpu().numpy()
+        zm_np = zero_mask_num.detach().cpu().numpy().astype(np.float64)
         out_np = _numba_inextensibility_constraint_enforcement(
             cv_np, nl_np, sc_np, ms_np, zm_np,
             self.tolerance

@@ -7,9 +7,8 @@ import numpy as np
 clamp_type = "ends"
 training_case = 1
 BDLO_type = 1
-eval_loss_1 = np.array(pd.read_pickle(r"training_record/eval_%s_loss_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type)))
-eval_step_1 = np.array(pd.read_pickle(r"training_record/eval_%s_epoches_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type)))
-
+eval_loss_1 = np.array(pd.read_pickle(r"../training_record/eval_%s_loss_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type)))
+eval_step_1 = np.array(pd.read_pickle(r"../training_record/eval_%s_epoches_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type)))
 fig, (ax1, ax2) = plt.subplots(1, 2)
 fig.set_figheight(10)
 fig.set_figwidth(20)

@@ -2,29 +2,25 @@ import torch
 import torch.nn as nn
 
 # Import DEFT functions
-from DEFT_func import DEFT_func
+from .DEFT_func import DEFT_func
 
 # Importing multiple utilities:
 # - rotation_matrix: Helper for creating rotation matrices from angles
 # - computeW, computeLengths, computeEdges: Utility functions for BDLO geometry
 # - visualize_tensors_3d_in_same_plot_no_zeros: For debugging/visualizing results
-from util import rotation_matrix, computeW, computeLengths, computeEdges, visualize_tensors_3d_in_same_plot_no_zeros
+from ..utils.util import rotation_matrix, computeW, computeLengths, computeEdges, visualize_tensors_3d_in_same_plot_no_zeros
 
 # Import constraints solver(s)
-from constraints_solver import constraints_enforcement
+from ..solvers.constraints_solver import constraints_enforcement
 import pytorch3d.transforms.rotation_conversions
 
 # A numba-accelerated version of constraints enforcement
-from constraints_enforcement_numba import constraints_enforcement_numba
+from ..solvers.constraints_enforcement_numba import constraints_enforcement_numba
 constraints_numba = constraints_enforcement_numba()
 
 # Importing a graph neural network for residual learning
-module_dir = "residual_learning_nn"
-import sys
-import os
 import numpy as np
-sys.path.append(module_dir)
-from GNN_tree import BatchedGNNModel
+from ..models.GNN_tree import BatchedGNNModel
 
 import time
 
@@ -436,10 +432,10 @@ class DEFT_sim(nn.Module):
         if inference_1_batch:
             undeformed_vert = constraints_numba.Inextensibility_Constraint_Enforcement(
                 batch,
-                (self.undeformed_vert.clone()).repeat(batch, 1, 1).detach().cpu().numpy(),
-                m_restEdgeL.detach().cpu().numpy(),
-                self.inext_scale.detach().cpu().numpy(),
-                self.mass_scale.detach().cpu().numpy(),
+                (self.undeformed_vert.clone()).repeat(batch, 1, 1).detach().cpu().numpy().astype(np.float64),
+                m_restEdgeL.detach().cpu().numpy().astype(np.float64),
+                self.inext_scale.detach().cpu().numpy().astype(np.float64),
+                self.mass_scale.detach().cpu().numpy().astype(np.float64),
                 self.zero_mask_num
             )
             undeformed_vert = torch.from_numpy(undeformed_vert)
@@ -1061,25 +1057,25 @@ class DEFT_sim(nn.Module):
                 previous_children_vertices_iteration_edge = b_DLOs_vertices[self.selected_children_index].view(self.batch, -1, self.n_vert, 3).clone()
 
                 if inference_1_batch:
-                    previous_parent_vertices_iteration_edge1 = previous_parent_vertices_iteration_edge1.detach().cpu().numpy().copy()
-                    previous_parent_vertices_iteration_edge2 = previous_parent_vertices_iteration_edge2.detach().cpu().numpy().copy()
-                    previous_children_vertices_iteration_edge = previous_children_vertices_iteration_edge.detach().cpu().numpy().copy()
+                    previous_parent_vertices_iteration_edge1 = previous_parent_vertices_iteration_edge1.detach().cpu().numpy().astype(np.float64).copy()
+                    previous_parent_vertices_iteration_edge2 = previous_parent_vertices_iteration_edge2.detach().cpu().numpy().astype(np.float64).copy()
+                    previous_children_vertices_iteration_edge = previous_children_vertices_iteration_edge.detach().cpu().numpy().astype(np.float64).copy()
 
             if inference_1_batch:
-                parent_rod_orientation = parent_rod_orientation.detach().cpu().numpy().copy()
-                children_rod_orientation = children_rod_orientation.detach().cpu().numpy().copy()
+                parent_rod_orientation = parent_rod_orientation.detach().cpu().numpy().astype(np.float64).copy()
+                children_rod_orientation = children_rod_orientation.detach().cpu().numpy().astype(np.float64).copy()
 
-                b_DLOs_vertices = b_DLOs_vertices.detach().cpu().numpy().copy()
+                b_DLOs_vertices = b_DLOs_vertices.detach().cpu().numpy().astype(np.float64).copy()
                 rotation_constraints_index1 = torch.linspace(0, (self.n_branch-1) * 2 - 2, len(self.rigid_body_coupling_index)).to(torch.int).detach().cpu().numpy().copy()
                 rotation_constraints_index2 = torch.linspace(1, ((self.n_branch-1) * 2 - 1), len(self.rigid_body_coupling_index)).to(torch.int).detach().cpu().numpy().copy()
-                parent_MOI_matrix_numpy = self.parent_MOI_matrix.detach().cpu().numpy().copy()
-                children_MOI_matrix_numpy = self.children_MOI_matrix.detach().cpu().numpy().copy()
-                momentum_scale_previous_numpy = self.momentum_scale_previous.detach().cpu().numpy().copy()
-                momentum_scale_next_numpy = self.momentum_scale_next.detach().cpu().numpy().copy()
-                coupling_mass_scale_numpy = self.coupling_mass_scale.detach().cpu().numpy().copy()
-                batched_m_restEdgeL_numpy = self.batched_m_restEdgeL.detach().cpu().numpy().copy()
-                inext_scale_numpy = self.inext_scale.detach().cpu().numpy().copy()
-                mass_scale_numpy = self.mass_scale.detach().cpu().numpy().copy()
+                parent_MOI_matrix_numpy = self.parent_MOI_matrix.detach().cpu().numpy().astype(np.float64).copy()
+                children_MOI_matrix_numpy = self.children_MOI_matrix.detach().cpu().numpy().astype(np.float64).copy()
+                momentum_scale_previous_numpy = self.momentum_scale_previous.detach().cpu().numpy().astype(np.float64).copy()
+                momentum_scale_next_numpy = self.momentum_scale_next.detach().cpu().numpy().astype(np.float64).copy()
+                coupling_mass_scale_numpy = self.coupling_mass_scale.detach().cpu().numpy().astype(np.float64).copy()
+                batched_m_restEdgeL_numpy = self.batched_m_restEdgeL.detach().cpu().numpy().astype(np.float64).copy()
+                inext_scale_numpy = self.inext_scale.detach().cpu().numpy().astype(np.float64).copy()
+                mass_scale_numpy = self.mass_scale.detach().cpu().numpy().astype(np.float64).copy()
 
                 # Repeatedly enforce rotation and inextensibility constraints
                 for constraint_loop_i in range(constraint_loop):
@@ -1144,9 +1140,9 @@ class DEFT_sim(nn.Module):
                         self.zero_mask_num
                     )
 
-                b_DLOs_vertices = torch.from_numpy(b_DLOs_vertices)
-                parent_rod_orientation = torch.from_numpy(parent_rod_orientation)
-                children_rod_orientation = torch.from_numpy(children_rod_orientation)
+                b_DLOs_vertices = torch.from_numpy(b_DLOs_vertices).to(torch.float64)
+                parent_rod_orientation = torch.from_numpy(parent_rod_orientation).to(torch.float64)
+                children_rod_orientation = torch.from_numpy(children_rod_orientation).to(torch.float64)
             else:
                 for _ in range(constraint_loop):
                     parent_vertices = b_DLOs_vertices[self.selected_parent_index]

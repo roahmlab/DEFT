@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import theseus as th
 
 # Custom utility functions
-from util import (
+from ..utils.util import (
     extractSinandCos,
     computeEdges,
     computeKB,
@@ -15,8 +15,8 @@ from util import (
     quaternion_rotation,
     quaternion_rotation_parallel,
 )
-from theta_solver_numpy import theta_optimize_numpy
-from theta_solver import theta_optimize
+from ..solvers.theta_solver_numpy import theta_optimize_numpy
+from ..solvers.theta_solver import theta_optimize
 
 
 class DEFT_func(nn.Module):
@@ -181,7 +181,7 @@ class DEFT_func(nn.Module):
             )
 
         # b_v is orthogonal to the edge and b_u
-        b_v = F.normalize(torch.cross(edges, b_u), dim=2)
+        b_v = F.normalize(torch.cross(edges, b_u, dim=2), dim=2)
 
         # Mask out invalid edges (if any) using edge_mask
         b_u = b_u * self.edge_mask

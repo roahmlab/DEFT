@@ -12,9 +12,12 @@ import numpy as np
 # save_pickle: Utility function to save data (e.g., losses) to a pickle file
 # Train_DEFTData / Eval_DEFTData: Custom dataset classes to load training/evaluation data
 # DEFT_sim: Simulation model class
-from util import DEFT_initialization, construct_b_DLOs, clamp_index, index_init, save_pickle, Train_DEFTData, \
-    Eval_DEFTData
-from DEFT_sim import DEFT_sim
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from deft.utils.util import DEFT_initialization, construct_b_DLOs, clamp_index, index_init, save_pickle, Train_DEFTData, Eval_DEFTData
+from deft.core.DEFT_sim import DEFT_sim
 from tqdm import tqdm
 import os
 import argparse
@@ -194,16 +197,16 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             raise Exception("warning: number of parent's vertices is larger than children's!")
 
         # Stiffness parameters
-        bend_stiffness_parent = nn.Parameter(2.5e-3 * torch.ones((1, 1, n_edge), device=device))
-        bend_stiffness_child1 = nn.Parameter(2.5e-3 * torch.ones((1, 1, n_edge), device=device))
-        bend_stiffness_child2 = nn.Parameter(2.5e-3 * torch.ones((1, 1, n_edge), device=device))
-        twist_stiffness = nn.Parameter(1e-4 * torch.ones((1, n_branch, n_edge), device=device))
-        damping = nn.Parameter(torch.tensor((2., 2., 2.), device=device))
+        bend_stiffness_parent = nn.Parameter(2.5e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        bend_stiffness_child1 = nn.Parameter(2.5e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        bend_stiffness_child2 = nn.Parameter(2.5e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        twist_stiffness = nn.Parameter(1e-4 * torch.ones((1, n_branch, n_edge), device=device, dtype=torch.float64))
+        damping = nn.Parameter(torch.tensor((2., 2., 2.), device=device, dtype=torch.float64))
 
         if residual_learning:
-            learning_weight = nn.Parameter(torch.tensor(0.02, device=device))
+            learning_weight = nn.Parameter(torch.tensor(0.02, device=device, dtype=torch.float64))
         else:
-            learning_weight = nn.Parameter(torch.tensor(0.00, device=device))
+            learning_weight = nn.Parameter(torch.tensor(0.00, device=device, dtype=torch.float64))
 
         rigid_body_coupling_index = [4, 7]
         parent_mass_scale = 1.
@@ -239,18 +242,18 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             raise Exception("warning: number of parent's vertices is larger than children's!")
 
         # Stiffness parameters
-        bend_stiffness_parent = nn.Parameter(3e-3 * torch.ones((1, 1, n_edge), device=device))
-        bend_stiffness_child1 = nn.Parameter(4e-3 * torch.ones((1, 1, n_edge), device=device))
-        bend_stiffness_child2 = nn.Parameter(4e-3 * torch.ones((1, 1, n_edge), device=device))
-        twist_stiffness = nn.Parameter(1e-4 * torch.ones((1, n_branch, n_edge), device=device))
+        bend_stiffness_parent = nn.Parameter(3e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        bend_stiffness_child1 = nn.Parameter(4e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        bend_stiffness_child2 = nn.Parameter(4e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        twist_stiffness = nn.Parameter(1e-4 * torch.ones((1, n_branch, n_edge), device=device, dtype=torch.float64))
 
         # Damping for each of the 3 branches
-        damping = nn.Parameter(torch.tensor((3., 4, 4.), device=device))
+        damping = nn.Parameter(torch.tensor((3., 4, 4.), device=device, dtype=torch.float64))
 
         if residual_learning:
-            learning_weight = nn.Parameter(torch.tensor(0.02, device=device))
+            learning_weight = nn.Parameter(torch.tensor(0.02, device=device, dtype=torch.float64))
         else:
-            learning_weight = nn.Parameter(torch.tensor(0.00, device=device))
+            learning_weight = nn.Parameter(torch.tensor(0.00, device=device, dtype=torch.float64))
 
         # Connection indices for the child branches
         rigid_body_coupling_index = [4, 8]
@@ -421,17 +424,17 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
     # Load pretrained models for initialization depending on BDLO_type and clamp_type
     if load_model:
         if BDLO_type == 1 and clamp_type == "ends":
-            DEFT_sim_train.load_state_dict(torch.load("save_model/BDLO1/DEFT_1_780_1.pth"), strict=False)
+            DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO1/DEFT_1_780_1.pth"), strict=False)
         if BDLO_type == 1 and clamp_type == "middle":
-            DEFT_sim_train.load_state_dict(torch.load("save_model/BDLO1/DEFT_middle_1_2260_1.pth"), strict=False)
+            DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO1/DEFT_middle_1_2260_1.pth"), strict=False)
         if BDLO_type == 2:
-            DEFT_sim_train.load_state_dict(torch.load("save_model/BDLO2/DEFT_2_820_2.pth"), strict=False)
+            DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO2/DEFT_2_820_2.pth"), strict=False)
         if BDLO_type == 3:
-            DEFT_sim_train.load_state_dict(torch.load("save_model/BDLO3/DEFT_3_40_3.pth"), strict=False)
+            DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO3/DEFT_3_40_3.pth"), strict=False)
         if BDLO_type == 3 and clamp_type == "middle":
-            DEFT_sim_train.load_state_dict(torch.load("save_model/BDLO3/DEFT_middle_3_2320_1.pth"), strict=False)
+            DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO3/DEFT_middle_3_2320_1.pth"), strict=False)
         if BDLO_type == 4:
-            DEFT_sim_train.load_state_dict(torch.load("save_model/BDLO4/DEFT_4_40_3.pth"), strict=False)
+            DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO4/DEFT_4_40_3.pth"), strict=False)
 
     # If we want to visualize the undeformed states
     if undeform_vis:
@@ -466,8 +469,8 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         ax.legend(handles=legend_elements)
         plt.show()
 
-    # Scale factor for learning rate
-    lr_scale = 10
+    # Scale factor for learning rate (reduced to prevent NaN)
+    lr_scale = 1
 
     # Define loss function
     loss_func = torch.nn.MSELoss()
@@ -478,28 +481,34 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
     if not residual_learning:
         # If not using residual learning, we optimize all or most DEFT parameters
         parameters_to_update = [
-            {"params": DEFT_sim_train.p_DLO_diagonal, "lr": 1e-5 * lr_scale},
-            {"params": DEFT_sim_train.c_DLO_diagonal, "lr": 1e-5 * lr_scale},
-            {"params": DEFT_sim_train.integration_ratio, "lr": 1e-5 * lr_scale},
-            {"params": DEFT_sim_train.velocity_ratio, "lr": 1e-5 * lr_scale},
-            {"params": DEFT_sim_train.undeformed_vert, "lr": 1e-5 * lr_scale},
-            {"params": DEFT_sim_train.mass_diagonal, "lr": 1e-5 * lr_scale},
-            {"params": DEFT_sim_train.damping, "lr": 1e-5 * lr_scale},
-            {"params": DEFT_sim_train.gravity, "lr": 1e-5 * lr_scale},
-            {"params": DEFT_sim_train.DEFT_func.twist_stiffness, "lr": 1e-5 * lr_scale},
-            {"params": DEFT_sim_train.DEFT_func.bend_stiffness_parent, "lr": 1e-9 * lr_scale},
-            {"params": DEFT_sim_train.DEFT_func.bend_stiffness_child1, "lr": 1e-9 * lr_scale},
-            {"params": DEFT_sim_train.DEFT_func.bend_stiffness_child2, "lr": 1e-9 * lr_scale},
+            {"params": DEFT_sim_train.p_DLO_diagonal, "lr": 1e-6 * lr_scale},
+            {"params": DEFT_sim_train.c_DLO_diagonal, "lr": 1e-6 * lr_scale},
+            {"params": DEFT_sim_train.integration_ratio, "lr": 1e-6 * lr_scale},
+            {"params": DEFT_sim_train.velocity_ratio, "lr": 1e-6 * lr_scale},
+            {"params": DEFT_sim_train.undeformed_vert, "lr": 1e-6 * lr_scale},
+            {"params": DEFT_sim_train.mass_diagonal, "lr": 1e-6 * lr_scale},
+            {"params": DEFT_sim_train.damping, "lr": 1e-6 * lr_scale},
+            {"params": DEFT_sim_train.gravity, "lr": 1e-6 * lr_scale},
+            {"params": DEFT_sim_train.DEFT_func.twist_stiffness, "lr": 1e-6 * lr_scale},
+            {"params": DEFT_sim_train.DEFT_func.bend_stiffness_parent, "lr": 1e-8 * lr_scale},
+            {"params": DEFT_sim_train.DEFT_func.bend_stiffness_child1, "lr": 1e-8 * lr_scale},
+            {"params": DEFT_sim_train.DEFT_func.bend_stiffness_child2, "lr": 1e-8 * lr_scale},
         ]
     else:
         # If using residual learning, we mainly update the GNN and the residual learning weight
         parameters_to_update = [
-            {"params": DEFT_sim_train.learning_weight, "lr": 1e-6 * lr_scale},
-            {"params": gnn_params, "lr": 1e-5 * lr_scale}
+            {"params": DEFT_sim_train.learning_weight, "lr": 1e-7 * lr_scale},
+            {"params": gnn_params, "lr": 1e-6 * lr_scale}
         ]
 
-    # Define the optimizer (here, SGD) with the chosen parameters
-    optimizer = optim.SGD(parameters_to_update)
+    # Check for NaN in initial parameters
+    for name, param in DEFT_sim_train.named_parameters():
+        if torch.isnan(param).any() or torch.isinf(param).any():
+            print(f"Warning: NaN/Inf found in parameter {name}, reinitializing...")
+            param.data = torch.randn_like(param.data) * 0.01
+    
+    # Define the optimizer (here, Adam for better stability) with the chosen parameters
+    optimizer = optim.Adam(parameters_to_update, eps=1e-8)
 
     # We'll store evaluation results after certain intervals
     eval_epochs = []
@@ -587,12 +596,12 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
                     # Save the current model
                     torch.save(
                         DEFT_sim_train.state_dict(),
-                        os.path.join("save_model/", "DEFT_%s_%s_%s_%s.pth" % (
+                        os.path.join("../save_model/", "DEFT_%s_%s_%s_%s.pth" % (
                         clamp_type, BDLO_type, str(training_iteration), training_case))
                     )
                     # Load the saved model into the evaluation simulation object
                     DEFT_sim_eval.load_state_dict(
-                        torch.load("save_model/DEFT_%s_%s_%s_%s.pth" % (
+                        torch.load("../save_model/DEFT_%s_%s_%s_%s.pth" % (
                         clamp_type, BDLO_type, str(training_iteration), training_case))
                     )
 
@@ -628,9 +637,9 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
                             eval_epochs.append(training_iteration)
 
                             # Save the evaluation losses to pickle
-                            save_pickle(eval_losses, "training_record/eval_%s_loss_DEFT_%s_%s.pkl" % (
+                            save_pickle(eval_losses, "../training_record/eval_%s_loss_DEFT_%s_%s.pkl" % (
                             clamp_type, training_case, BDLO_type))
-                            save_pickle(eval_epochs, "training_record/eval_%s_epoches_DEFT_%s_%s.pkl" % (
+                            save_pickle(eval_epochs, "../training_record/eval_%s_epoches_DEFT_%s_%s.pkl" % (
                             clamp_type, training_case, BDLO_type))
 
                 # Increment steps and iteration
@@ -657,20 +666,30 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
                     vis=vis
                 )
 
+                # Check for NaN in loss
+                if torch.isnan(total_loss) or torch.isinf(total_loss):
+                    print(f"NaN/Inf detected at iteration {training_iteration}, skipping batch")
+                    optimizer.zero_grad()
+                    continue
+
                 # Record and print training loss
                 training_losses.append(traj_loss.cpu().detach().numpy() / train_time_horizon)
                 training_epochs.append(training_iteration)
 
                 # Backprop through the total loss
                 total_loss.backward(retain_graph=True)
+                
+                # Gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(DEFT_sim_train.parameters(), max_norm=1.0)
+                
                 optimizer.step()
                 optimizer.zero_grad()
 
                 # Save training losses to pickle
                 save_pickle(training_losses,
-                            "training_record/train_%s_loss_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type))
+                            "../training_record/train_%s_loss_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type))
                 save_pickle(training_epochs,
-                            "training_record/train_%s_step_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type))
+                            "../training_record/train_%s_step_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type))
 
 
 if __name__ == "__main__":
@@ -678,7 +697,11 @@ if __name__ == "__main__":
 
     # Make sure to use double precision for stability in the DEFT simulations
     torch.set_default_dtype(torch.float64)
+    # Ensure all tensor operations use float64
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     torch.manual_seed(1)
+    np.random.seed(1)
 
     # Limit the number of threads used by PyTorch and underlying libraries for reproducibility
     os.environ["OMP_NUM_THREADS"] = "1"
@@ -705,7 +728,7 @@ if __name__ == "__main__":
     parser.add_argument("--undeform_vis", type=bool, default=False)
 
     # Whether we do inference only for 1 batch (for speed) or for all eval sets
-    parser.add_argument("--inference_1_batch", type=bool, default=False)
+    parser.add_argument("--inference_1_batch", type=lambda x: x.lower() == 'true', default=False)
 
     # Whether to enable residual learning: if True, GNN-based updates are used
     parser.add_argument("--residual_learning", type=bool, default=False)
@@ -717,7 +740,7 @@ if __name__ == "__main__":
     parser.add_argument("--inference_vis", type=bool, default=False)
 
     # load trained model
-    parser.add_argument("--load_model", type=bool, default=True)
+    parser.add_argument("--load_model", type=bool, default=False)
 
     # Flags for which branches are clamped
     clamp_parent = True

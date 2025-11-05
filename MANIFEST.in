@@ -1,0 +1,9 @@
+include README.md
+include requirements.txt
+include LICENSE
+recursive-include assets *.png *.jpg *.jpeg *.gif
+recursive-include docs *.md *.rst *.txt
+recursive-include examples *.py
+recursive-include tests *.py
+global-exclude __pycache__
+global-exclude *.py[co]
