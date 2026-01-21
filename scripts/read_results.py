@@ -4,11 +4,13 @@ import numpy as np
 
 """example of reading pkl files"""
 
-clamp_type = "ends"
+clamp_type = "middle"
 training_case = 1
-BDLO_type = 1
+BDLO_type = 3
 eval_loss_1 = np.array(pd.read_pickle(r"../training_record/eval_%s_loss_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type)))
 eval_step_1 = np.array(pd.read_pickle(r"../training_record/eval_%s_epoches_DEFT_%s_%s.pkl" % (clamp_type, training_case, BDLO_type)))
+print(np.sqrt(eval_loss_1))
+print("loss minimum: ", np.min(np.sqrt(eval_loss_1)))
 fig, (ax1, ax2) = plt.subplots(1, 2)
 fig.set_figheight(10)
 fig.set_figwidth(20)

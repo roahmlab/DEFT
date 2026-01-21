@@ -435,7 +435,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO3/DEFT_middle_3_2320_1.pth"), strict=False)
         if BDLO_type == 4:
             DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO4/DEFT_4_40_3.pth"), strict=False)
-
+    
     # If we want to visualize the undeformed states
     if undeform_vis:
         # Visualize the first batch's undeformed state
@@ -470,7 +470,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         plt.show()
 
     # Scale factor for learning rate (reduced to prevent NaN)
-    lr_scale = 1
+    lr_scale = 10
 
     # Define loss function
     loss_func = torch.nn.MSELoss()
@@ -722,7 +722,7 @@ if __name__ == "__main__":
     parser.add_argument("--total_time", type=int, default=500)
 
     # train_time_horizon is how many timesteps we simulate in each training iteration
-    parser.add_argument("--train_time_horizon", type=int, default=100)
+    parser.add_argument("--train_time_horizon", type=int, default=50)
 
     # Whether to visualize the initial undeformed vertices
     parser.add_argument("--undeform_vis", type=bool, default=False)
