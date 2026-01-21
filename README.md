@@ -49,17 +49,20 @@ Key dependencies include:
 
 ## Installation
 
-### From Source
+### Using Conda Environment (Recommended)
+The easiest way to set up the environment is using the provided conda environment file:
 ```bash
 git clone https://github.com/roahmlab/DEFT.git
 cd DEFT
+conda env create -f environment.yml
+conda activate DEFT
 pip install -e .
 ```
 
-### Using Conda Environment
+### From Source (Alternative)
 ```bash
-conda create -n DEFT python=3.11
-conda activate DEFT
+git clone https://github.com/roahmlab/DEFT.git
+cd DEFT
 pip install -r requirements.txt
 pip install -e .
 ```
