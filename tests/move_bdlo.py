@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader
 # Global simulation time configuration
 SIM_TIME_HORIZON = 100  # Adjust this to change simulation duration
 
-def setup_deft_sim(load_checkpoint=None):
+def setup_deft_sim(load_checkpoint=None, use_orientation_constraints=True, use_attachment_constraints=True):
     """Setup DEFT simulation with BDLO1 (from DEFT_train.py)"""
     torch.set_default_dtype(torch.float64)
     device = "cpu"
@@ -101,7 +101,9 @@ def setup_deft_sim(load_checkpoint=None):
         clamp_parent=True, clamp_child1=False, clamp_child2=False, index_selection1=index_selection1,
         index_selection2=index_selection2, bend_stiffness_parent=bend_stiffness_parent,
         bend_stiffness_child1=bend_stiffness_child1, bend_stiffness_child2=bend_stiffness_child2,
-        twist_stiffness=twist_stiffness, damping=damping, learning_weight=learning_weight
+        twist_stiffness=twist_stiffness, damping=damping, learning_weight=learning_weight,
+        use_orientation_constraints=use_orientation_constraints,
+        use_attachment_constraints=use_attachment_constraints
     )
     
     # Load checkpoint if provided
@@ -136,32 +138,32 @@ def create_custom_trajectory(initial_state, time_horizon, parent_clamped_selecti
         custom_traj[0, t, 1, 0] -= 0.3 * progress
     return custom_traj
 
-def compute_gradient_wrt_control(deft_sim, b_DLOs_vertices_traj, previous_b_DLOs_vertices_traj, 
-                                  target_vertices, custom_control, parent_theta_clamp, 
+def compute_gradient_wrt_control(deft_sim, b_DLOs_vertices_traj, previous_b_DLOs_vertices_traj,
+                                  target_vertices, custom_control, parent_theta_clamp,
                                   child1_theta_clamp, child2_theta_clamp):
     """Compute gradient of final position cost w.r.t. reduced 6 DOF displacements"""
     batch = 1
     parent_clamped_selection = torch.tensor((0, 1, 11, 12))
-    
+
     # Get initial and final positions from custom_control
     initial_clamped = custom_control[0, 0]  # [n_clamped, 3]
     final_clamped = custom_control[0, -1]   # [n_clamped, 3]
-    
+
     # Compute full 12 DOF displacements
     full_displacements = (final_clamped - initial_clamped).clone()
-    
+
     # Reduce to 6 DOF: average pairs (0,1) and (11,12)
     reduced_displacements = torch.stack([
         (full_displacements[0] + full_displacements[1]) / 2,  # avg of vertices 0,1
         (full_displacements[2] + full_displacements[3]) / 2   # avg of vertices 11,12
     ]).requires_grad_(True)
-    
+
     # Expand back to 12 DOF
     final_displacements = torch.stack([
         reduced_displacements[0], reduced_displacements[0],  # vertices 0,1
         reduced_displacements[1], reduced_displacements[1]   # vertices 11,12
     ])
-    
+
     # Interpolate trajectory from initial to final
     clamped_full = torch.zeros(batch, SIM_TIME_HORIZON, 3, 13, 3, dtype=torch.float64)
     for t in range(SIM_TIME_HORIZON):
@@ -169,7 +171,7 @@ def compute_gradient_wrt_control(deft_sim, b_DLOs_vertices_traj, previous_b_DLOs
         interpolated = initial_clamped + alpha * final_displacements
         for i, idx in enumerate(parent_clamped_selection):
             clamped_full[0, t, 0, idx] = interpolated[i]
-    
+
     predicted_vertices, _ = deft_sim.iterative_predict(
         time_horizon=SIM_TIME_HORIZON,
         b_DLOs_vertices_traj=b_DLOs_vertices_traj,
@@ -181,14 +183,14 @@ def compute_gradient_wrt_control(deft_sim, b_DLOs_vertices_traj, previous_b_DLOs
         child2_theta_clamp=child2_theta_clamp,
         inference_1_batch=False
     )
-    
+
     final_pred = predicted_vertices[0, -1]
     final_target = target_vertices[0, -1]
     cost = torch.sum((final_pred - final_target) ** 2)
-    
+
     # Gradient w.r.t. reduced 6 DOF
     grad = torch.autograd.grad(cost, reduced_displacements)[0]
-    
+
     return grad.detach(), cost.item()
 
 def finite_difference_gradient(deft_sim, b_DLOs_vertices_traj, previous_b_DLOs_vertices_traj,
@@ -196,25 +198,25 @@ def finite_difference_gradient(deft_sim, b_DLOs_vertices_traj, previous_b_DLOs_v
                                child1_theta_clamp, child2_theta_clamp, eps=1e-6):
     """Compute gradient using finite differences for verification (reduced 6 DOF)"""
     parent_clamped_selection = torch.tensor((0, 1, -2, -1))
-    
+
     # Get initial and final positions
     initial_clamped = custom_control[0, 0]
     final_clamped = custom_control[0, -1]
     full_displacements = final_clamped - initial_clamped
-    
+
     # Reduce to 6 DOF
     reduced_displacements = torch.stack([
         (full_displacements[0] + full_displacements[1]) / 2,
         (full_displacements[2] + full_displacements[3]) / 2
     ])
-    
+
     def compute_cost(reduced_disp):
         # Expand to 12 DOF
         expanded = torch.stack([
             reduced_disp[0], reduced_disp[0],
             reduced_disp[1], reduced_disp[1]
         ])
-        
+
         with torch.no_grad():
             clamped_full = torch.zeros(1, SIM_TIME_HORIZON, 3, 13, 3, dtype=torch.float64)
             for t in range(SIM_TIME_HORIZON):
@@ -222,7 +224,7 @@ def finite_difference_gradient(deft_sim, b_DLOs_vertices_traj, previous_b_DLOs_v
                 interpolated = initial_clamped + alpha * expanded
                 for i, idx in enumerate(parent_clamped_selection):
                     clamped_full[0, t, 0, idx] = interpolated[i]
-            
+
             pred, _ = deft_sim.iterative_predict(
                 time_horizon=SIM_TIME_HORIZON, b_DLOs_vertices_traj=b_DLOs_vertices_traj,
                 previous_b_DLOs_vertices_traj=previous_b_DLOs_vertices_traj,
@@ -233,21 +235,21 @@ def finite_difference_gradient(deft_sim, b_DLOs_vertices_traj, previous_b_DLOs_v
                 inference_1_batch=False
             )
             return torch.sum((pred[0, -1] - target_vertices[0, -1]) ** 2).item()
-    
+
     fd_grad = torch.zeros_like(reduced_displacements)
     test_indices = [(0, 0), (0, 2), (1, 1)]  # Test 3 components of reduced 6 DOF
-    
+
     for idx in test_indices:
         disp_plus = reduced_displacements.clone()
         disp_plus[idx] += eps
         cost_plus = compute_cost(disp_plus)
-        
+
         disp_minus = reduced_displacements.clone()
         disp_minus[idx] -= eps
         cost_minus = compute_cost(disp_minus)
-        
+
         fd_grad[idx] = (cost_plus - cost_minus) / (2 * eps)
-    
+
     return fd_grad, test_indices, eps
 
 class DEFTOptimizationProblem:
@@ -268,23 +270,20 @@ class DEFTOptimizationProblem:
         self.child2_theta_clamp = child2_theta_clamp
         self.parent_clamped_selection = torch.tensor((0, 1, 11, 12))
         self.initial_clamped = b_DLOs_vertices_traj[0, 0, 0, self.parent_clamped_selection].detach().clone()
-        self.n = 6  # 2 independent displacements * 3 coords (vertices 0&1 move together, 11&12 move together)
+        self.n = 6  # 2 independent displacements * 3 coords
         self.iteration = 0
         self.converged = False
         self.best_solution = None  # Store solution when converged
-        
+
     def _expand_displacements(self, x):
-        """Expand 6 DOF to 12 DOF by coupling vertex pairs"""
-        # x is [2, 3]: displacement for (0,1) and (11,12)
-        disp_pair1 = x[0]  # displacement for vertices 0 and 1
-        disp_pair2 = x[1]  # displacement for vertices 11 and 12
-        # Return [4, 3]: same displacement for each pair
-        return torch.stack([disp_pair1, disp_pair1, disp_pair2, disp_pair2])
+        """Expand 6 DOF [2, 3] to 12 DOF [4, 3]: vertices 0&1 share, 11&12 share"""
+        # x is [2, 3]: displacement for pair (0,1) and pair (11,12)
+        return torch.stack([x[0], x[0], x[1], x[1]])
         
     def objective(self, x):
         """Compute objective: final configuration error"""
         # Expand 6 DOF to 12 DOF
-        final_displacements = self._expand_displacements(torch.from_numpy(x.reshape(2, 3)))
+        final_displacements = self._expand_displacements(torch.from_numpy(x).reshape(2, 3))
         
         # Build trajectory
         clamped_full = torch.zeros(1, SIM_TIME_HORIZON, 3, 13, 3, dtype=torch.float64)
@@ -304,9 +303,10 @@ class DEFTOptimizationProblem:
                 parent_theta_clamp=self.parent_theta_clamp,
                 child1_theta_clamp=self.child1_theta_clamp,
                 child2_theta_clamp=self.child2_theta_clamp,
-                inference_1_batch=False
+                inference_1_batch=True
             )
-        
+        if predicted_vertices.dim() != 5:
+            print("Wrong shape, without batch")
         cost = torch.sum((predicted_vertices[0, -1] - self.target_vertices[0, -1]) ** 2)
         
         # Compute endpoint distances
@@ -317,7 +317,7 @@ class DEFTOptimizationProblem:
         print(f"  [Iter {self.iteration}] Endpoint distances: {distances.numpy()}")
         
         # Early stopping: all endpoints within 0.02
-        if torch.all(distances < 0.06) and not self.converged:
+        if torch.all(distances < 0.025) and not self.converged:
             print(f"  *** Converged! All endpoints within 0.025 ***")
             self.converged = True
             self.best_solution = x.copy()  # Save the converged solution
@@ -334,9 +334,9 @@ class DEFTOptimizationProblem:
     
     def gradient(self, x):
         """Compute gradient using PyTorch autograd"""
-        # Create 6 DOF variables
-        reduced_displacements = torch.from_numpy(x.reshape(2, 3)).double().requires_grad_(True)
-        
+        # Create 6 DOF variables [2, 3]
+        reduced_displacements = torch.from_numpy(x).reshape(2, 3).double().requires_grad_(True)
+
         # Expand to 12 DOF
         final_displacements = self._expand_displacements(reduced_displacements)
 
@@ -371,16 +371,18 @@ def trajectory_optimization_ipopt(deft_sim, b_DLOs_vertices_traj, previous_b_DLO
     if not IPOPT_AVAILABLE:
         raise ImportError("cyipopt not available. Install with: pip install cyipopt")
     
+    import time
+    start_time = time.time()
     # Create problem
     problem_obj = DEFTOptimizationProblem(
         deft_sim, b_DLOs_vertices_traj, previous_b_DLOs_vertices_traj,
         target_vertices, parent_theta_clamp, child1_theta_clamp, child2_theta_clamp
     )
     
-    n = 6  # 2 independent displacements * 3 coords
+    n = problem_obj.n  # 6 DOF: 2 pairs * 3 coords
     lb = [-1e20] * n
     ub = [1e20] * n
-    
+
     # Initial guess: zero displacements (stay at initial positions)
     x0 = np.zeros(n)
     
@@ -400,7 +402,8 @@ def trajectory_optimization_ipopt(deft_sim, b_DLOs_vertices_traj, previous_b_DLO
     
     print("\nStarting IPOPT optimization...")
     solution, info = problem.solve(x0)
-    
+    elapsed_time = time.time() - start_time
+
     # Use saved solution if early stopping occurred
     if problem_obj.best_solution is not None:
         print("Using early-stopped solution (distances < 0.02)")
@@ -410,7 +413,7 @@ def trajectory_optimization_ipopt(deft_sim, b_DLOs_vertices_traj, previous_b_DLO
     print(f"Final objective: {info['obj_val']:.6f}")
     
     # Generate optimized trajectory for visualization
-    final_displacements = problem_obj._expand_displacements(torch.from_numpy(solution.reshape(2, 3)))
+    final_displacements = problem_obj._expand_displacements(torch.from_numpy(solution).reshape(2, 3))
     clamped_full = torch.zeros(1, SIM_TIME_HORIZON, 3, 13, 3, dtype=torch.float64)
     for t in range(SIM_TIME_HORIZON):
         alpha = t / (SIM_TIME_HORIZON - 1)
@@ -431,15 +434,19 @@ def trajectory_optimization_ipopt(deft_sim, b_DLOs_vertices_traj, previous_b_DLO
             inference_1_batch=False
         )
     
-    return solution.reshape(2, 3), info, optimized_traj
+    return solution, info, optimized_traj, elapsed_time
 
-def move_bdlo_with_data(checkpoint_path=None):
+def move_bdlo_with_data(checkpoint_path=None, use_orientation_constraints=True, use_attachment_constraints=True):
     """Load real data from dataset and run prediction"""
     torch.set_default_dtype(torch.float64)
     device = "cpu"
-    
+
     # Setup DEFT sim with checkpoint
-    deft_sim, _, parent_theta_clamp, child1_theta_clamp, child2_theta_clamp = setup_deft_sim(load_checkpoint=checkpoint_path)
+    deft_sim, _, parent_theta_clamp, child1_theta_clamp, child2_theta_clamp = setup_deft_sim(
+        load_checkpoint=checkpoint_path,
+        use_orientation_constraints=use_orientation_constraints,
+        use_attachment_constraints=use_attachment_constraints
+    )
     
     # Load evaluation dataset (from DEFT_train.py)
     eval_dataset = Eval_DEFTData(
@@ -510,7 +517,7 @@ def animate_prediction(predicted_vertices, target_vertices, skip_frames=5, title
                 ax.plot(valid[:, 0], valid[:, 1], valid[:, 2], 'o-', color=colors[i], 
                        linewidth=2, alpha=0.3, label=f'Target {i}')
         
-        # Overlay current prediction (solid)
+        # Overlay current prediction (solid)elapsed_time
         for i in range(3):
             verts = pred[frame, i]
             mask = torch.any(verts != 0, dim=-1)
@@ -531,16 +538,36 @@ def animate_prediction(predicted_vertices, target_vertices, skip_frames=5, title
     return anim
 
 if __name__ == "__main__":
-    checkpoint_path = "/home/yizhouch/DEFT_2025/save_model/DEFT_ends_1_3520_1.pth"
-    
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--use_orientation_constraints", type=lambda x: x.lower() == 'true', default=True)
+    parser.add_argument("--use_attachment_constraints", type=lambda x: x.lower() == 'true', default=True)
+    parser.add_argument("--sample_idx", type=int, default=0, help="Which eval sample to use")
+    parser.add_argument("--initial_frame", type=int, default=0, help="Timestep for initial configuration")
+    parser.add_argument("--target_frame", type=int, default=-1, help="Timestep for target configuration (-1 = last)")
+    args = parser.parse_args()
+
+    checkpoint_path = args.checkpoint
+    use_orientation_constraints = args.use_orientation_constraints
+    use_attachment_constraints = args.use_attachment_constraints
+
     print("Loading and predicting with trained model...")
-    pred_verts, pred_vels, target = move_bdlo_with_data(checkpoint_path=checkpoint_path)
+    pred_verts, pred_vels, target = move_bdlo_with_data(
+        checkpoint_path=checkpoint_path,
+        use_orientation_constraints=use_orientation_constraints,
+        use_attachment_constraints=use_attachment_constraints
+    )
     print(f"Done!")
     
     # Compute gradients
     print("\nComputing gradients w.r.t. control inputs...")
     torch.set_default_dtype(torch.float64)
-    deft_sim, _, parent_theta_clamp, child1_theta_clamp, child2_theta_clamp = setup_deft_sim(load_checkpoint=checkpoint_path)
+    deft_sim, _, parent_theta_clamp, child1_theta_clamp, child2_theta_clamp = setup_deft_sim(
+        load_checkpoint=checkpoint_path,
+        use_orientation_constraints=use_orientation_constraints,
+        use_attachment_constraints=use_attachment_constraints
+    )
     
     eval_dataset = Eval_DEFTData(
         BDLO_type=1, n_parent_vertices=13, n_children_vertices=(5, 4),
@@ -548,7 +575,34 @@ if __name__ == "__main__":
         eval_set_number=1, total_time=500, eval_time_horizon=498, device="cpu"
     )
     eval_loader = DataLoader(eval_dataset, batch_size=1, shuffle=False)
-    previous_b_DLOs_vertices_traj, b_DLOs_vertices_traj, target_b_DLOs_vertices_traj = next(iter(eval_loader))
+    # Select the requested sample
+    for i, data in enumerate(eval_loader):
+        if i == args.sample_idx:
+            previous_b_DLOs_vertices_traj, b_DLOs_vertices_traj, target_b_DLOs_vertices_traj = data
+            break
+    else:
+        raise ValueError(f"Sample index {args.sample_idx} out of range (dataset has {len(eval_dataset)} samples)")
+
+    # Select initial and target frames
+    initial_frame = args.initial_frame
+    target_frame = args.target_frame
+    print(f"Using sample {args.sample_idx}, initial_frame={initial_frame}, target_frame={target_frame}")
+
+    # Override: use selected frames as initial/target
+    # initial_frame indexes into b_DLOs_vertices_traj [batch, time, branch, vert, 3]
+    # Slice so initial config is at index 0 and target config is at the chosen target frame
+    if target_frame < 0:
+        target_frame = b_DLOs_vertices_traj.shape[1] + target_frame
+    b_DLOs_vertices_traj_selected = b_DLOs_vertices_traj[:, initial_frame:].contiguous()
+    previous_b_DLOs_vertices_traj_selected = previous_b_DLOs_vertices_traj[:, initial_frame:].contiguous()
+    # Build target: keep full trajectory but the cost uses index target_frame relative to initial
+    target_b_DLOs_vertices_traj_selected = b_DLOs_vertices_traj.clone()
+    # Put the target frame config at the last position for the optimizer
+    target_b_DLOs_vertices_traj_selected[:, -1] = b_DLOs_vertices_traj[:, target_frame]
+
+    b_DLOs_vertices_traj = b_DLOs_vertices_traj_selected
+    previous_b_DLOs_vertices_traj = previous_b_DLOs_vertices_traj_selected
+    target_b_DLOs_vertices_traj = target_b_DLOs_vertices_traj_selected
     
     parent_clamped_selection = torch.tensor((0, 1, -2, -1))
     custom_control = create_custom_trajectory(b_DLOs_vertices_traj, SIM_TIME_HORIZON, parent_clamped_selection)
@@ -580,13 +634,13 @@ if __name__ == "__main__":
         print("\n" + "="*60)
         print("IPOPT TRAJECTORY OPTIMIZATION")
         print("="*60)
-        import time
-        start_time = time.time()
-        optimized_displacements, info, optimized_traj = trajectory_optimization_ipopt(
+        # import time
+        # start_time = time.time()
+        optimized_displacements, info, optimized_traj, elapsed_time = trajectory_optimization_ipopt(
             deft_sim, b_DLOs_vertices_traj, previous_b_DLOs_vertices_traj,
             target_b_DLOs_vertices_traj, parent_theta_clamp, child1_theta_clamp, child2_theta_clamp
         )
-        elapsed_time = time.time() - start_time
+        # elapsed_time = time.time() - start_time
         
         print(f"\nOptimized displacements shape: {optimized_displacements.shape}")
         print(f"\n*** OPTIMIZATION TIME: {elapsed_time:.3f} seconds ***")

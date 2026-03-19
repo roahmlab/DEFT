@@ -25,7 +25,8 @@ import matplotlib.pyplot as plt
 
 
 def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, inference_vis, inference_1_batch,
-          residual_learning, clamp_type, load_model):
+          residual_learning, clamp_type, load_model, training_mode,
+          use_orientation_constraints, use_attachment_constraints):
     # The total_time parameter is the maximum timesteps of the loaded data
     # The train_time_horizon is how many timesteps to unroll the simulation during training
     # The function trains or partially fine-tunes a DEFT model for a specific branched BDLO type
@@ -90,7 +91,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
 
         # If we use residual learning, learning_weight is used to scale the residual from the GNN
         if residual_learning:
-            learning_weight = nn.Parameter(torch.tensor(0.02, device=device))
+            learning_weight = nn.Parameter(torch.tensor(0.1, device=device))
         else:
             learning_weight = nn.Parameter(torch.tensor(0.00, device=device))
 
@@ -140,7 +141,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         damping = nn.Parameter(torch.tensor((2.5, 2., 2.), device=device))
 
         if residual_learning:
-            learning_weight = nn.Parameter(torch.tensor(0.02, device=device))
+            learning_weight = nn.Parameter(torch.tensor(0.1, device=device))
         else:
             learning_weight = nn.Parameter(torch.tensor(0.00, device=device))
 
@@ -204,7 +205,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         damping = nn.Parameter(torch.tensor((2., 2., 2.), device=device, dtype=torch.float64))
 
         if residual_learning:
-            learning_weight = nn.Parameter(torch.tensor(0.02, device=device, dtype=torch.float64))
+            learning_weight = nn.Parameter(torch.tensor(0.1, device=device, dtype=torch.float64))
         else:
             learning_weight = nn.Parameter(torch.tensor(0.00, device=device, dtype=torch.float64))
 
@@ -251,7 +252,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         damping = nn.Parameter(torch.tensor((3., 4, 4.), device=device, dtype=torch.float64))
 
         if residual_learning:
-            learning_weight = nn.Parameter(torch.tensor(0.02, device=device, dtype=torch.float64))
+            learning_weight = nn.Parameter(torch.tensor(0.1, device=device, dtype=torch.float64))
         else:
             learning_weight = nn.Parameter(torch.tensor(0.00, device=device, dtype=torch.float64))
 
@@ -387,7 +388,9 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         bend_stiffness_child2=bend_stiffness_child2,
         twist_stiffness=twist_stiffness,
         damping=damping,
-        learning_weight=learning_weight
+        learning_weight=learning_weight,
+        use_orientation_constraints=use_orientation_constraints,
+        use_attachment_constraints=use_attachment_constraints
     )
     DEFT_sim_eval = DEFT_sim(
         batch=eval_batch,
@@ -418,23 +421,59 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         bend_stiffness_child2=bend_stiffness_child2,
         twist_stiffness=twist_stiffness,
         damping=damping,
-        learning_weight=learning_weight
+        learning_weight=learning_weight,
+        use_orientation_constraints=use_orientation_constraints,
+        use_attachment_constraints=use_attachment_constraints
     )
 
     # Load pretrained models for initialization depending on BDLO_type and clamp_type
+    # If residual_learning is on, load full model (physics + GNN);
+    # If residual_learning is off, load only physics parameters (not GNN)
     if load_model:
-        if BDLO_type == 1 and clamp_type == "ends":
-            DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO1/DEFT_1_780_1.pth"), strict=False)
-        if BDLO_type == 1 and clamp_type == "middle":
-            DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO1/DEFT_middle_1_2260_1.pth"), strict=False)
-        if BDLO_type == 2:
-            DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO2/DEFT_2_820_2.pth"), strict=False)
-        if BDLO_type == 3:
-            DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO3/DEFT_3_40_3.pth"), strict=False)
-        if BDLO_type == 3 and clamp_type == "middle":
-            DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO3/DEFT_middle_3_2320_1.pth"), strict=False)
-        if BDLO_type == 4:
-            DEFT_sim_train.load_state_dict(torch.load("../save_model/BDLO4/DEFT_4_40_3.pth"), strict=False)
+        pretrained_path = None
+        if residual_learning:
+            # Load full model including GNN weights
+            if BDLO_type == 1 and clamp_type == "ends":
+                pretrained_path = "../save_model/BDLO1/DEFT_ends_1_pretrained_full_model.pth"
+            if BDLO_type == 1 and clamp_type == "middle":
+                pretrained_path = "../save_model/BDLO1/DEFT_middle_1_pretrained_full_model.pth"
+            if BDLO_type == 2:
+                pretrained_path = "../save_model/BDLO2/DEFT_ends_2_pretrained_full_model.pth"
+            if BDLO_type == 3 and clamp_type == "ends":
+                pretrained_path = "../save_model/BDLO3/DEFT_ends_3_pretrained_full_model.pth"
+            if BDLO_type == 3 and clamp_type == "middle":
+                pretrained_path = "../save_model/BDLO3/DEFT_middle_3_pretrained_full_model.pth"
+            if BDLO_type == 4:
+                pretrained_path = "../save_model/BDLO4/DEFT_ends_4_pretrained_full_model.pth"
+
+            if pretrained_path is not None:
+                pretrained_dict = torch.load(pretrained_path)
+                DEFT_sim_train.load_state_dict(pretrained_dict)
+                print(f"Loaded full model from {pretrained_path}")
+        else:
+            # Load only physics parameters (not GNN) since GNN is not used without residual learning
+            if BDLO_type == 1 and clamp_type == "ends":
+                pretrained_path = "../save_model/BDLO1/DEFT_ends_1_pretrained_wo_residual.pth"
+            if BDLO_type == 1 and clamp_type == "middle":
+                pretrained_path = "../save_model/BDLO1/DEFT_middle_1_pretrained_wo_residual.pth"
+            if BDLO_type == 2:
+                pretrained_path = "../save_model/BDLO2/DEFT_ends_2_pretrained_wo_residual.pth"
+            if BDLO_type == 3 and clamp_type == "ends":
+                pretrained_path = "../save_model/BDLO3/DEFT_ends_3_pretrained_wo_residual.pth"
+            if BDLO_type == 3 and clamp_type == "middle":
+                pretrained_path = "../save_model/BDLO3/DEFT_middle_3_pretrained_wo_residual.pth"
+            if BDLO_type == 4:
+                pretrained_path = "../save_model/BDLO4/DEFT_ends_4_pretrained_wo_residual.pth"
+
+            if pretrained_path is not None:
+                pretrained_dict = torch.load(pretrained_path)
+                model_dict = DEFT_sim_train.state_dict()
+                # Only keep non-GNN parameters from pretrained
+                pretrained_dict_filtered = {k: v for k, v in pretrained_dict.items()
+                                           if k in model_dict and not k.startswith('GNN_tree.')}
+                model_dict.update(pretrained_dict_filtered)
+                DEFT_sim_train.load_state_dict(model_dict)
+                print(f"Loaded physics parameters from {pretrained_path} (GNN initialized from scratch)")
     
     # If we want to visualize the undeformed states
     if undeform_vis:
@@ -475,31 +514,56 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
     # Define loss function
     loss_func = torch.nn.MSELoss()
 
-    # We separate parameter sets based on whether we are doing residual learning or not
-    gnn_params = DEFT_sim_train.GNN_tree.parameters()
+    # Define physics and GNN parameter groups
+    physics_params = [
+        {"params": DEFT_sim_train.p_DLO_diagonal, "lr": 1e-6 * lr_scale},
+        {"params": DEFT_sim_train.c_DLO_diagonal, "lr": 1e-6 * lr_scale},
+        {"params": DEFT_sim_train.integration_ratio, "lr": 1e-6 * lr_scale},
+        {"params": DEFT_sim_train.velocity_ratio, "lr": 1e-6 * lr_scale},
+        {"params": DEFT_sim_train.undeformed_vert, "lr": 1e-6 * lr_scale},
+        {"params": DEFT_sim_train.mass_diagonal, "lr": 1e-6 * lr_scale},
+        {"params": DEFT_sim_train.damping, "lr": 1e-6 * lr_scale},
+        {"params": DEFT_sim_train.gravity, "lr": 1e-6 * lr_scale},
+        {"params": DEFT_sim_train.DEFT_func.twist_stiffness, "lr": 1e-6 * lr_scale},
+        {"params": DEFT_sim_train.DEFT_func.bend_stiffness_parent, "lr": 1e-8 * lr_scale},
+        {"params": DEFT_sim_train.DEFT_func.bend_stiffness_child1, "lr": 1e-8 * lr_scale},
+        {"params": DEFT_sim_train.DEFT_func.bend_stiffness_child2, "lr": 1e-8 * lr_scale},
+    ]
+    residual_params = [
+        {"params": DEFT_sim_train.learning_weight, "lr": 1e-4 * lr_scale},
+        {"params": DEFT_sim_train.GNN_tree.parameters(), "lr": 1e-5 * lr_scale},
+    ]
 
-    if not residual_learning:
-        # If not using residual learning, we optimize all or most DEFT parameters
-        parameters_to_update = [
-            {"params": DEFT_sim_train.p_DLO_diagonal, "lr": 1e-6 * lr_scale},
-            {"params": DEFT_sim_train.c_DLO_diagonal, "lr": 1e-6 * lr_scale},
-            {"params": DEFT_sim_train.integration_ratio, "lr": 1e-6 * lr_scale},
-            {"params": DEFT_sim_train.velocity_ratio, "lr": 1e-6 * lr_scale},
-            {"params": DEFT_sim_train.undeformed_vert, "lr": 1e-6 * lr_scale},
-            {"params": DEFT_sim_train.mass_diagonal, "lr": 1e-6 * lr_scale},
-            {"params": DEFT_sim_train.damping, "lr": 1e-6 * lr_scale},
-            {"params": DEFT_sim_train.gravity, "lr": 1e-6 * lr_scale},
-            {"params": DEFT_sim_train.DEFT_func.twist_stiffness, "lr": 1e-6 * lr_scale},
-            {"params": DEFT_sim_train.DEFT_func.bend_stiffness_parent, "lr": 1e-8 * lr_scale},
-            {"params": DEFT_sim_train.DEFT_func.bend_stiffness_child1, "lr": 1e-8 * lr_scale},
-            {"params": DEFT_sim_train.DEFT_func.bend_stiffness_child2, "lr": 1e-8 * lr_scale},
-        ]
-    else:
-        # If using residual learning, we mainly update the GNN and the residual learning weight
-        parameters_to_update = [
-            {"params": DEFT_sim_train.learning_weight, "lr": 1e-7 * lr_scale},
-            {"params": gnn_params, "lr": 1e-6 * lr_scale}
-        ]
+    # Select which parameters to optimize based on training_mode
+    # "physics": train only material/physics parameters, freeze GNN
+    # "residual": train only GNN + learning_weight, freeze physics
+    # "full": train both physics and residual together
+    if training_mode == "physics":
+        # Freeze GNN parameters
+        for param in DEFT_sim_train.GNN_tree.parameters():
+            param.requires_grad = False
+        DEFT_sim_train.learning_weight.requires_grad = False
+        parameters_to_update = physics_params
+        print("Training mode: physics only (GNN frozen)")
+    elif training_mode == "residual":
+        # Freeze physics parameters
+        DEFT_sim_train.p_DLO_diagonal.requires_grad = False
+        DEFT_sim_train.c_DLO_diagonal.requires_grad = False
+        DEFT_sim_train.integration_ratio.requires_grad = False
+        DEFT_sim_train.velocity_ratio.requires_grad = False
+        DEFT_sim_train.undeformed_vert.requires_grad = False
+        DEFT_sim_train.mass_diagonal.requires_grad = False
+        DEFT_sim_train.damping.requires_grad = False
+        DEFT_sim_train.gravity.requires_grad = False
+        DEFT_sim_train.DEFT_func.twist_stiffness.requires_grad = False
+        DEFT_sim_train.DEFT_func.bend_stiffness_parent.requires_grad = False
+        DEFT_sim_train.DEFT_func.bend_stiffness_child1.requires_grad = False
+        DEFT_sim_train.DEFT_func.bend_stiffness_child2.requires_grad = False
+        parameters_to_update = residual_params
+        print("Training mode: residual only (physics frozen)")
+    elif training_mode == "full":
+        parameters_to_update = physics_params + residual_params
+        print("Training mode: full (physics + residual)")
 
     # Check for NaN in initial parameters
     for name, param in DEFT_sim_train.named_parameters():
@@ -742,6 +806,13 @@ if __name__ == "__main__":
     # load trained model
     parser.add_argument("--load_model", type=bool, default=False)
 
+    # training_mode: "physics" (material params only), "residual" (GNN only, physics frozen), "full" (both)
+    parser.add_argument("--training_mode", type=str, default="physics", choices=["physics", "residual", "full"])
+
+    # Constraint flags for ablation baselines
+    parser.add_argument("--use_orientation_constraints", type=lambda x: x.lower() == 'true', default=True)
+    parser.add_argument("--use_attachment_constraints", type=lambda x: x.lower() == 'true', default=True)
+
     # Flags for which branches are clamped
     clamp_parent = True
     clamp_child1 = False
@@ -766,5 +837,8 @@ if __name__ == "__main__":
         inference_1_batch=args.inference_1_batch,
         residual_learning=args.residual_learning,
         clamp_type=args.clamp_type,
-        load_model=args.load_model
+        load_model=args.load_model,
+        training_mode=args.training_mode,
+        use_orientation_constraints=args.use_orientation_constraints,
+        use_attachment_constraints=args.use_attachment_constraints
     )

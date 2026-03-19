@@ -80,10 +80,17 @@ class BatchedGNNModel(nn.Module):
         # self.gcn3 = BatchedGCNLayer(hidden_features, hidden_features)
         # self.gcn4 = BatchedGCNLayer(hidden_features, out_features)
 
-        self.gcn1 = BatchedGCNLayer(in_features, hidden_features * 2)
-        self.gcn2 = BatchedGCNLayer(hidden_features * 2, hidden_features)
+        # Improved architecture: no bottleneck, consistent width, deeper network
+        self.gcn1 = BatchedGCNLayer(in_features, hidden_features)
+        self.gcn2 = BatchedGCNLayer(hidden_features, hidden_features)
         self.gcn3 = BatchedGCNLayer(hidden_features, hidden_features)
-        self.gcn4 = BatchedGCNLayer(hidden_features, out_features)
+        self.gcn4 = BatchedGCNLayer(hidden_features, hidden_features)
+        self.gcn5 = BatchedGCNLayer(hidden_features, out_features)
+
+        # Initialize output layer to near-zero so GNN starts with minimal corrections
+        # This prevents the optimizer from turning off learning_weight at the start
+        nn.init.normal_(self.gcn5.linear.weight, mean=0.0, std=0.001)
+        nn.init.zeros_(self.gcn5.linear.bias)
 
         # self.gcn4 = BatchedGCNLayer(3, hidden_features)
         # self.gcn5 = BatchedGCNLayer(hidden_features, out_features)
@@ -111,12 +118,22 @@ class BatchedGNNModel(nn.Module):
         x = x.view(self.batch, -1, in_feature)
         inputs = inputs.view(self.batch, -1, 3)
 
-        x1 = self.gcn1(x, self.adjacency_batch)
-        x1 = F.relu(x1)
-        x1 = self.gcn2(x1, self.adjacency_batch)
-        x1 = F.relu(x1)
-        x1 = self.gcn3(x1, self.adjacency_batch)
-        x = self.gcn4(x1, self.adjacency_batch)
+        # Deep feed-forward GNN with LeakyReLU (no internal skip connections)
+        # The residual learning happens at the physics level, not within GNN
+        x = self.gcn1(x, self.adjacency_batch)
+        x = F.leaky_relu(x, negative_slope=0.2)
+
+        x = self.gcn2(x, self.adjacency_batch)
+        x = F.leaky_relu(x, negative_slope=0.2)
+
+        x = self.gcn3(x, self.adjacency_batch)
+        x = F.leaky_relu(x, negative_slope=0.2)
+
+        x = self.gcn4(x, self.adjacency_batch)
+        x = F.leaky_relu(x, negative_slope=0.2)
+
+        # Output layer (no activation)
+        x = self.gcn5(x, self.adjacency_batch)
 
         x = x.view(self.batch, -1, self.n_vert, 3)
         inputs = inputs.view(self.batch, -1, self.n_vert, 3)
