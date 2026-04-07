@@ -292,7 +292,9 @@ class constraints_enforcement(nn.Module):
 
     def Inextensibility_Constraint_Enforcement_Coupling(self, parent_vertices, child_vertices, coupling_index,
                                                         coupling_mass_scale, selected_parent_index,
-                                                        selected_children_index):
+                                                        selected_children_index, bdlo5=False,
+                                                        child2_coupling_mass_scale=None,
+                                                        skip_child2_coupling=False):
         """
         Enforces inextensibility or position constraints between a 'parent' rod and a 'child' rod
         at a specific coupling index.
@@ -304,27 +306,52 @@ class constraints_enforcement(nn.Module):
             coupling_mass_scale (torch.Tensor): Matrix scale for how parent/child share corrections.
             selected_parent_index (list): Which rods in a bigger scene are 'parents'.
             selected_children_index (list): Which rods in the bigger scene are 'children'.
+            bdlo5 (bool): If True, child_vertices is interleaved [c1_b0, c2_b0, c1_b1, c2_b1, ...].
+                                     Child1 couples to parent, then child2[0] snaps onto child1[coupling_index[1]].
 
         Returns:
             b_DLOs_vertices (torch.Tensor): Combined or updated vertices for the rods
                                             after enforcing coupling constraints.
         """
-        # Vector from parent to child's first vertex
-        updated_edges = child_vertices[:, 0] - parent_vertices[:, coupling_index].view(-1, 3)
+        if bdlo5:
+            batch = parent_vertices.size(0)
+            c1_idx = list(range(0, batch * 2, 2))
+            c2_idx = list(range(1, batch * 2, 2))
+            # Child1 → parent coupling
+            c1_edge = child_vertices[c1_idx, 0] - parent_vertices[:, coupling_index[0]]
+            l1_c1 = coupling_mass_scale[:batch, 0]
+            l2_c1 = coupling_mass_scale[:batch, 1]
+            parent_vertices[:, coupling_index[0]] += (l1_c1 @ c1_edge.unsqueeze(-1)).view(-1, 3)
+            child_vertices[c1_idx, 0] += (l2_c1 @ c1_edge.unsqueeze(-1)).view(-1, 3)
+            # Child2 → child1 coupling
+            if skip_child2_coupling:
+                # Decouple: leave child2 entirely free of child1.
+                pass
+            elif child2_coupling_mass_scale is not None:
+                c2_edge = child_vertices[c2_idx, 0] - child_vertices[c1_idx, coupling_index[1]]
+                l1_c2 = child2_coupling_mass_scale[:batch, 0]
+                l2_c2 = child2_coupling_mass_scale[:batch, 1]
+                child_vertices[c1_idx, coupling_index[1]] += (l1_c2 @ c2_edge.unsqueeze(-1)).view(-1, 3)
+                child_vertices[c2_idx, 0] += (l2_c2 @ c2_edge.unsqueeze(-1)).view(-1, 3)
+            else:
+                child_vertices[c2_idx, 0] = child_vertices[c1_idx, coupling_index[1]]
+        else:
+            # Vector from parent to child's first vertex
+            updated_edges = child_vertices[:, 0] - parent_vertices[:, coupling_index].view(-1, 3)
 
-        # coupling_mass_scale => (l1, l2)
-        l1 = coupling_mass_scale[:, 0]
-        l2 = coupling_mass_scale[:, 1]
+            # coupling_mass_scale => (l1, l2)
+            l1 = coupling_mass_scale[:, 0]
+            l2 = coupling_mass_scale[:, 1]
 
-        # Update parent's coupling_index
-        parent_vertices[:, coupling_index] = parent_vertices[:, coupling_index] + (
-                l1 @ updated_edges.unsqueeze(dim=-1)
-        ).view(-1, len(coupling_index), 3)
+            # Update parent's coupling_index
+            parent_vertices[:, coupling_index] = parent_vertices[:, coupling_index] + (
+                    l1 @ updated_edges.unsqueeze(dim=-1)
+            ).view(-1, len(coupling_index), 3)
 
-        # Update child's first vertex
-        child_vertices[:, 0] = child_vertices[:, 0] + (
-                l2 @ updated_edges.unsqueeze(dim=-1)
-        ).reshape(-1, 3)
+            # Update child's first vertex
+            child_vertices[:, 0] = child_vertices[:, 0] + (
+                    l2 @ updated_edges.unsqueeze(dim=-1)
+            ).reshape(-1, 3)
 
         # Combine back into b_DLOs_vertices for a final representation
         b_DLOs_vertices = torch.empty(len(selected_parent_index) + len(selected_children_index),
@@ -333,6 +360,103 @@ class constraints_enforcement(nn.Module):
         b_DLOs_vertices[selected_children_index] = child_vertices
 
         return b_DLOs_vertices
+
+    def Rotation_Constraint_Single_Junction(
+            self, parent_vertices, child1_vertices,
+            parent_rod_orientation, child1_rod_orientation,
+            prev_parent_vertices, prev_child1_vertices,
+            parent_edge_idx, momentum_scale
+    ):
+        """
+        Enforce orientation constraint at a single parent-child junction using
+        incremental orientation tracking.
+
+        Stage 1: Track how each edge rotated from prev→curr, accumulate into orientations.
+        Stage 2: Compute mismatch between accumulated orientations, apply momentum-weighted correction.
+
+        Args:
+            parent_vertices: [batch, n_vert, 3]
+            child1_vertices: [batch, n_child_vert, 3]
+            parent_rod_orientation: [batch, n_edge, 4] quaternions
+            child1_rod_orientation: [batch, 4]
+            prev_parent_vertices: [batch, n_vert, 3]
+            prev_child1_vertices: [batch, n_child_vert, 3]
+            parent_edge_idx: int
+            momentum_scale: [batch, 2, 3, 3]
+        """
+        batch = parent_vertices.size(0)
+        idx = parent_edge_idx
+
+        # Stage 1: Track edge rotations
+        prev_parent_edge = prev_parent_vertices[:, idx + 1] - prev_parent_vertices[:, idx]
+        curr_parent_edge = parent_vertices[:, idx + 1] - parent_vertices[:, idx]
+        prev_child_edge = prev_child1_vertices[:, 1] - prev_child1_vertices[:, 0]
+        curr_child_edge = child1_vertices[:, 1] - child1_vertices[:, 0]
+
+        parent_tracking_rot = pytorch3d.transforms.matrix_to_quaternion(
+            self.rotation_matrix_from_vectors(
+                prev_parent_edge.unsqueeze(1), curr_parent_edge.unsqueeze(1)).squeeze(1))
+        child_tracking_rot = pytorch3d.transforms.matrix_to_quaternion(
+            self.rotation_matrix_from_vectors(
+                prev_child_edge.unsqueeze(1), curr_child_edge.unsqueeze(1)).squeeze(1))
+
+        # Track new parent-edge orientation through a local var so we don't write
+        # back to parent_rod_orientation[:, idx] in-place. The pytorch3d.quaternion_*
+        # ops below internally call unbind(-1) and save those views for backward;
+        # an in-place write to the same slice would corrupt them.
+        parent_orient_at_idx = pytorch3d.transforms.quaternion_multiply(
+            parent_tracking_rot, parent_rod_orientation[:, idx])
+        child1_rod_orientation = pytorch3d.transforms.quaternion_multiply(
+            child_tracking_rot, child1_rod_orientation)
+
+        # Stage 2: Compute mismatch and apply correction
+        delta_q = pytorch3d.transforms.quaternion_multiply(
+            parent_orient_at_idx,
+            pytorch3d.transforms.quaternion_invert(child1_rod_orientation))
+        delta_aa = pytorch3d.transforms.quaternion_to_axis_angle(delta_q)
+
+        parent_correction_aa = (momentum_scale[:, 0] @ delta_aa.unsqueeze(-1)).squeeze(-1)
+        child_correction_aa = (momentum_scale[:, 1] @ delta_aa.unsqueeze(-1)).squeeze(-1)
+
+        parent_correction_q = pytorch3d.transforms.axis_angle_to_quaternion(parent_correction_aa)
+        child_correction_q = pytorch3d.transforms.axis_angle_to_quaternion(child_correction_aa)
+
+        # Update orientations (still local to parent_orient_at_idx; written back via cat below)
+        parent_orient_at_idx = pytorch3d.transforms.quaternion_multiply(
+            parent_correction_q, parent_orient_at_idx)
+        child1_rod_orientation = pytorch3d.transforms.quaternion_multiply(
+            child_correction_q, child1_rod_orientation)
+
+        # Rebuild parent_rod_orientation out-of-place: only slot `idx` changes,
+        # all other slots are passed through unchanged via slicing + cat.
+        parent_rod_orientation = torch.cat([
+            parent_rod_orientation[:, :idx],
+            parent_orient_at_idx.unsqueeze(1),
+            parent_rod_orientation[:, idx + 1:]
+        ], dim=1)
+
+        # Apply vertex rotations — rotate around first vertex of each edge
+        # Parent edge [idx, idx+1] around parent[idx]
+        p_origin = parent_vertices[:, idx:idx+1, :]
+        p_pair = parent_vertices[:, idx:idx+2, :]
+        p_centered = p_pair - p_origin
+        p_q_exp = parent_correction_q.unsqueeze(1).expand(-1, 2, -1)
+        p_rotated = pytorch3d.transforms.quaternion_apply(
+            p_q_exp.reshape(-1, 4), p_centered.reshape(-1, 3)
+        ).view(batch, 2, 3) + p_origin
+        parent_vertices[:, idx:idx+2] = p_rotated
+
+        # Child edge [0, 1] around child[0]
+        c_origin = child1_vertices[:, 0:1, :]
+        c_pair = child1_vertices[:, 0:2, :]
+        c_centered = c_pair - c_origin
+        c_q_exp = child_correction_q.unsqueeze(1).expand(-1, 2, -1)
+        c_rotated = pytorch3d.transforms.quaternion_apply(
+            c_q_exp.reshape(-1, 4), c_centered.reshape(-1, 3)
+        ).view(batch, 2, 3) + c_origin
+        child1_vertices[:, 0:2] = c_rotated
+
+        return parent_vertices, child1_vertices, parent_rod_orientation, child1_rod_orientation
 
     def quaternion_magnitude(self, quaternion):
         """

@@ -23,6 +23,10 @@ import os
 import argparse
 import matplotlib.pyplot as plt
 
+# DEBUG: enable autograd anomaly detection so any in-place mutation that breaks
+# backward shows the forward stack trace where the offending tensor was created.
+torch.autograd.set_detect_anomaly(True)
+
 
 def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, inference_vis, inference_1_batch,
           residual_learning, clamp_type, load_model, training_mode,
@@ -104,6 +108,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         moment_ratio = 0.1
         children_moment_scale = (0.5, 0.5)
         children_mass_scale = (1, 1)
+        bdlo5 = False
 
     if BDLO_type == 2:
         # Similar initialization for BDLO2
@@ -159,6 +164,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         parent_clamped_selection = torch.tensor((0, 1, -2, -1))
         child1_clamped_selection = torch.tensor((2))
         child2_clamped_selection = torch.tensor((2))
+        bdlo5 = False
 
     if BDLO_type == 3:
         # Initialization for BDLO3
@@ -215,6 +221,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         moment_ratio = 0.1
         children_moment_scale = (0.5, 0.5)
         children_mass_scale = (1, 1)
+        bdlo5 = False
 
     if BDLO_type == 4:
         # Initialization for BDLO4
@@ -268,6 +275,58 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         parent_clamped_selection = torch.tensor((0, 1, -2, -1))
         child1_clamped_selection = torch.tensor((2))
         child2_clamped_selection = torch.tensor((2))
+        bdlo5 = False
+
+    if BDLO_type == 5:
+        # BDLO5: child1 attaches to parent vertex 5, child2 attaches to child1 local vertex 1
+        undeformed_BDLO = torch.tensor([
+            [[0.188293, 0.172336, 0.13665, 0.099796, 0.073642, 0.0541, 0.049203,
+              0.067681, 0.098314, 0.144249, 0.194441, 0.215592, -0.004642,
+              -0.050726, -0.081415, -0.026287, -0.100634, -0.133205]],
+            [[0.000706, -0.001975, -0.005219, -0.006773, -0.005287, -0.003288,
+              -0.008895, -0.009546, -0.009834, -0.00937, -0.01009, -0.009817,
+              -0.00524, -0.006016, -0.003387, -0.008853, -0.009468, -0.006654]],
+            [[0.259138, 0.231036, 0.158627, 0.080946, -0.004805, -0.095316,
+              -0.183408, -0.272979, -0.348157, -0.413674, -0.475076, -0.499779,
+              -0.091729, -0.088754, -0.094614, -0.182658, -0.219473, -0.229931]]
+        ]).permute(1, 2, 0)
+
+        n_parent_vertices = 12
+        n_child1_vertices = 4
+        n_child2_vertices = 4
+        train_set_number = 75
+        eval_set_number = 26
+
+        cs_n_vert = (n_child1_vertices, n_child2_vertices)
+        n_vert = n_parent_vertices
+        n_edge = n_vert - 1
+        if n_parent_vertices <= max(cs_n_vert):
+            raise Exception("warning: number of parent's vertices is larger than children's!")
+
+        bend_stiffness_parent = nn.Parameter(2e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        bend_stiffness_child1 = nn.Parameter(2e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        bend_stiffness_child2 = nn.Parameter(2e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        twist_stiffness = nn.Parameter(1e-4 * torch.ones((1, n_branch, n_edge), device=device, dtype=torch.float64))
+
+        damping = nn.Parameter(torch.tensor((3., 3., 3.), device=device, dtype=torch.float64))
+
+        if residual_learning:
+            learning_weight = nn.Parameter(torch.tensor(0.1, device=device, dtype=torch.float64))
+        else:
+            learning_weight = nn.Parameter(torch.tensor(0.00, device=device, dtype=torch.float64))
+
+        rigid_body_coupling_index = [5, 1]
+
+        parent_mass_scale = 1.
+        parent_moment_scale = 10.
+        moment_ratio = 0.1
+        children_moment_scale = (0.5, 0.5)
+        children_mass_scale = (1, 1)
+
+        parent_clamped_selection = torch.tensor((0, 1, -2, -1))
+        child1_clamped_selection = torch.tensor((2))
+        child2_clamped_selection = torch.tensor((2))
+        bdlo5 = True
 
     # Decide how many batches we use in evaluation (1 batch if inference_1_batch is True, else the entire eval_set_number)
     if inference_1_batch:
@@ -296,7 +355,8 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         parent_moment_scale,
         children_moment_scale,
         children_mass_scale,
-        moment_ratio
+        moment_ratio,
+        bdlo5=bdlo5
     )
 
     # Construct the branched BDLO from data for the training batch
@@ -313,14 +373,26 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         child1_vertices_undeform,
         child1_vertices_undeform,
         child2_vertices_undeform,
-        child2_vertices_undeform
+        child2_vertices_undeform,
+        bdlo5=bdlo5
     )
 
     # Transform the axis from local coordinate to global by re-indexing the coordinate axes
-    b_DLOs_vertices_undeform_transform = torch.zeros_like(b_DLOs_vertices_undeform_untransform)
-    b_DLOs_vertices_undeform_transform[:, :, :, 0] = -b_DLOs_vertices_undeform_untransform[:, :, :, 2]
-    b_DLOs_vertices_undeform_transform[:, :, :, 1] = -b_DLOs_vertices_undeform_untransform[:, :, :, 0]
-    b_DLOs_vertices_undeform_transform[:, :, :, 2] = b_DLOs_vertices_undeform_untransform[:, :, :, 1]
+    if BDLO_type == 5:
+        # BDLO5: apply (-z,-x,y), then rotate -X 90° (x,z,-y), then negate x
+        step1 = torch.zeros_like(b_DLOs_vertices_undeform_untransform)
+        step1[:, :, :, 0] = -b_DLOs_vertices_undeform_untransform[:, :, :, 2]
+        step1[:, :, :, 1] = -b_DLOs_vertices_undeform_untransform[:, :, :, 0]
+        step1[:, :, :, 2] = b_DLOs_vertices_undeform_untransform[:, :, :, 1]
+        b_DLOs_vertices_undeform_transform = torch.zeros_like(step1)
+        b_DLOs_vertices_undeform_transform[:, :, :, 0] = -step1[:, :, :, 0]
+        b_DLOs_vertices_undeform_transform[:, :, :, 1] = step1[:, :, :, 2]
+        b_DLOs_vertices_undeform_transform[:, :, :, 2] = -step1[:, :, :, 1]
+    else:
+        b_DLOs_vertices_undeform_transform = torch.zeros_like(b_DLOs_vertices_undeform_untransform)
+        b_DLOs_vertices_undeform_transform[:, :, :, 0] = -b_DLOs_vertices_undeform_untransform[:, :, :, 2]
+        b_DLOs_vertices_undeform_transform[:, :, :, 1] = -b_DLOs_vertices_undeform_untransform[:, :, :, 0]
+        b_DLOs_vertices_undeform_transform[:, :, :, 2] = b_DLOs_vertices_undeform_untransform[:, :, :, 1]
 
     # The first sample in the batch of undeformed vertices (reshape to [n_branch, n_vert, 3])
     b_undeformed_vert = b_DLOs_vertices_undeform_transform[0].view(n_branch, -1, 3)
@@ -390,7 +462,8 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         damping=damping,
         learning_weight=learning_weight,
         use_orientation_constraints=use_orientation_constraints,
-        use_attachment_constraints=use_attachment_constraints
+        use_attachment_constraints=use_attachment_constraints,
+        bdlo5=bdlo5
     )
     DEFT_sim_eval = DEFT_sim(
         batch=eval_batch,
@@ -423,7 +496,8 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         damping=damping,
         learning_weight=learning_weight,
         use_orientation_constraints=use_orientation_constraints,
-        use_attachment_constraints=use_attachment_constraints
+        use_attachment_constraints=use_attachment_constraints,
+        bdlo5=bdlo5
     )
 
     # Load pretrained models for initialization depending on BDLO_type and clamp_type
@@ -593,7 +667,8 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             eval_set_number,
             total_time,
             eval_time_horizon,
-            device
+            device,
+            bdlo5=bdlo5
         )
         eval_data_len = len(eval_dataset)
         train_dataset = Train_DEFTData(
@@ -605,7 +680,8 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             train_set_number,
             total_time,
             train_time_horizon,
-            device
+            device,
+            bdlo5=bdlo5
         )
         train_data_loader = DataLoader(train_dataset, batch_size=train_batch, shuffle=True, drop_last=True)
 
@@ -620,7 +696,8 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             eval_set_number,
             total_time,
             eval_time_horizon,
-            device
+            device,
+            bdlo5=bdlo5
         )
         eval_data_len = len(eval_dataset)
         train_dataset = Train_DEFTData(
@@ -632,7 +709,8 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             train_set_number,
             total_time,
             train_time_horizon,
-            device
+            device,
+            bdlo5=bdlo5
         )
         train_data_loader = DataLoader(train_dataset, batch_size=train_batch, shuffle=True, drop_last=True)
 
@@ -646,6 +724,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
     # The main training loop
     if model == "DEFT":
         training_iteration = 0
+        vis_type = "DEFT_%s" % BDLO_type
         for epoch in range(train_epoch):
             bar = tqdm(train_data_loader)
             for data in bar:
@@ -696,7 +775,8 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
                                 vis=vis
                             )
                             # Print and record the average loss
-                            print(np.sqrt(traj_loss_eval.cpu().detach().numpy() / total_time))
+                            avg_loss = np.sqrt(traj_loss_eval.cpu().detach().numpy() / total_time)
+                            print(f"Eval RMSE: {avg_loss:.6f}")
                             eval_losses.append(traj_loss_eval.cpu().detach().numpy() / total_time)
                             eval_epochs.append(training_iteration)
 

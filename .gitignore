@@ -1,0 +1,7 @@
+# Python bytecode caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Local debug visualization output
+scripts/sanity_check/

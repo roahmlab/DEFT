@@ -375,7 +375,7 @@ def parallelTransportFrame(e0, e1, io_u):
 
 def DEFT_initialization(parent_vertices, child1_vertices, child2_vertices, n_branch, p_n_vert, cs_n_vert,
                         rigid_body_coupling_index, parent_mass_scale, parent_moment_scale, children_moment_scale,
-                        children_mass_scale, moment_ratio):
+                        children_mass_scale, moment_ratio, bdlo5=False):
     """
     Initializes mass, moment of inertia (MOI), and orientation data for a branched discrete elastic rod system
     with 1 parent rod and (n_branch-1) child rods.
@@ -425,8 +425,14 @@ def DEFT_initialization(parent_vertices, child1_vertices, child2_vertices, n_bra
     # and build child rods.
     for i in range(len(rigid_body_coupling_index)):
         # MOI for parent rod at rigid_body_coupling_index[i]-1
-        I_x_parent = 1 / 12 * parent_nominal_length[rigid_body_coupling_index[i] - 1] ** 2 \
-                     + 1 / 4 * parent_nominal_radius[rigid_body_coupling_index[i] - 1] ** 2
+        if bdlo5 and i == 1:
+            moi_length = children_nominal_length[0, rigid_body_coupling_index[i] - 1]
+            moi_radius = parent_nominal_radius[rigid_body_coupling_index[i] - 1]
+        else:
+            moi_length = parent_nominal_length[rigid_body_coupling_index[i] - 1]
+            moi_radius = parent_nominal_radius[rigid_body_coupling_index[i] - 1]
+        I_x_parent = 1 / 12 * moi_length ** 2 \
+                     + 1 / 4 * moi_radius ** 2
         I_y_parent = I_x_parent
         I_z_parent = 1 / 2 * parent_nominal_radius[rigid_body_coupling_index[i] - 1] ** 2
         parent_MOI[2 * i, 0] = I_x_parent * parent_moment_scale
@@ -451,8 +457,12 @@ def DEFT_initialization(parent_vertices, child1_vertices, child2_vertices, n_bra
                 (parent_vertices[:, rigid_body_coupling_index[i]].unsqueeze(dim=1), child1_vertices), dim=1
             )
         if i == 1:
+            if bdlo5:
+                shared_vertex = children_vertices[:, 0, rigid_body_coupling_index[i]]
+            else:
+                shared_vertex = parent_vertices[:, rigid_body_coupling_index[i]]
             children_vertices[:, i, :c_n_vert] = torch.cat(
-                (parent_vertices[:, rigid_body_coupling_index[i]].unsqueeze(dim=1), child2_vertices), dim=1
+                (shared_vertex.unsqueeze(dim=1), child2_vertices), dim=1
             )
 
         # Compute length and radius for children
@@ -492,7 +502,8 @@ def DEFT_initialization(parent_vertices, child1_vertices, child2_vertices, n_bra
 def construct_b_DLOs(batch, rigid_body_coupling_index, p_n_vert, cs_n_vert, n_branch,
                      previous_parent_vertices, parent_vertices,
                      previous_child1_vertices, child1_vertices,
-                     previous_child2_vertices, child2_vertices):
+                     previous_child2_vertices, child2_vertices,
+                     bdlo5=False):
     """
     Constructs a batched representation of the full branched DLO's vertices:
     [batch, n_branch, p_n_vert, 3].
@@ -532,18 +543,35 @@ def construct_b_DLOs(batch, rigid_body_coupling_index, p_n_vert, cs_n_vert, n_br
                 dim=1
             )
         if i == 1:
+            if bdlo5:
+                # Build child1 full vertices from batch=1 source data to get the shared vertex
+                c1_n_vert = cs_n_vert[0]
+                child1_full = torch.cat(
+                    (parent_vertices[0:1, rigid_body_coupling_index[0]].unsqueeze(dim=1), child1_vertices[0:1]),
+                    dim=1
+                )
+                prev_child1_full = torch.cat(
+                    (previous_parent_vertices[0:1, rigid_body_coupling_index[0]].unsqueeze(dim=1),
+                     previous_child1_vertices[0:1]),
+                    dim=1
+                )
+                shared_vertex = child1_full[:, rigid_body_coupling_index[i]]
+                prev_shared_vertex = prev_child1_full[:, rigid_body_coupling_index[i]]
+            else:
+                shared_vertex = parent_vertices[:, rigid_body_coupling_index[i]]
+                prev_shared_vertex = previous_parent_vertices[:, rigid_body_coupling_index[i]]
             b_DLOs_vertices[:, i + 1, :c_n_vert] = torch.cat(
-                (parent_vertices[:, rigid_body_coupling_index[i]].unsqueeze(dim=1), child2_vertices), dim=1
+                (shared_vertex.unsqueeze(dim=1), child2_vertices), dim=1
             )
             previous_b_DLOs_vertices[:, i + 1, :c_n_vert] = torch.cat(
-                (previous_parent_vertices[:, rigid_body_coupling_index[i]].unsqueeze(dim=1), previous_child2_vertices),
+                (prev_shared_vertex.unsqueeze(dim=1), previous_child2_vertices),
                 dim=1
             )
     return b_DLOs_vertices, previous_b_DLOs_vertices
 
 
 def construct_BDLOs_data(total_length, rigid_body_coupling_index, p_n_vert, cs_n_vert, n_branch,
-                         parent_vertices, child1_vertices, child2_vertices):
+                         parent_vertices, child1_vertices, child2_vertices, bdlo5=False):
     """
     Constructs a timeline of branched DLO vertices for a sequence of length total_length.
 
@@ -569,8 +597,12 @@ def construct_BDLOs_data(total_length, rigid_body_coupling_index, p_n_vert, cs_n
                 (parent_vertices[:, rigid_body_coupling_index[i]].unsqueeze(dim=1), child1_vertices), dim=1
             )
         if i == 1:
+            if bdlo5:
+                shared_vertex = b_DLOs_vertices[:, 1, rigid_body_coupling_index[i]]
+            else:
+                shared_vertex = parent_vertices[:, rigid_body_coupling_index[i]]
             b_DLOs_vertices[:, i + 1, :c_n_vert] = torch.cat(
-                (parent_vertices[:, rigid_body_coupling_index[i]].unsqueeze(dim=1), child2_vertices), dim=1
+                (shared_vertex.unsqueeze(dim=1), child2_vertices), dim=1
             )
     return b_DLOs_vertices
 
@@ -958,7 +990,8 @@ class Train_DEFTData(Dataset):
     """
 
     def __init__(self, BDLO_type, n_parent_vertices, n_children_vertices, n_branch,
-                 rigid_body_coupling_index, train_set_number, total_time, training_time_horizon, device):
+                 rigid_body_coupling_index, train_set_number, total_time, training_time_horizon, device,
+                 bdlo5=False):
         super(Train_DEFTData, self).__init__()
         # Root directory containing data
         self.root_dir = "../dataset/BDLO%s/train/" % BDLO_type
@@ -1000,7 +1033,8 @@ class Train_DEFTData(Dataset):
             # Construct the branched rod data structure for the entire time sequence
             BDLO_vert_no_trans = construct_BDLOs_data(total_time, rigid_body_coupling_index,
                                                       n_parent_vertices, n_children_vertices,
-                                                      n_branch, parent_vertices, child1_vertices, child2_vertices)
+                                                      n_branch, parent_vertices, child1_vertices, child2_vertices,
+                                                      bdlo5=bdlo5)
             # Transform from (x,y,z)->(-z, -x, y) for user coordinate system
             BDLO_vert = torch.zeros_like(BDLO_vert_no_trans)
             BDLO_vert[:, :, :, 0] = -BDLO_vert_no_trans[:, :, :, 2]
@@ -1047,7 +1081,8 @@ class Eval_DEFTData(Dataset):
     """
 
     def __init__(self, BDLO_type, n_parent_vertices, n_children_vertices, n_branch,
-                 rigid_body_coupling_index, eval_set_number, total_time, eval_time_horizon, device):
+                 rigid_body_coupling_index, eval_set_number, total_time, eval_time_horizon, device,
+                 bdlo5=False):
         super(Eval_DEFTData, self).__init__()
         # Root directory for evaluation data
         self.root_dir = "../dataset/BDLO%s/eval/" % BDLO_type
@@ -1083,7 +1118,8 @@ class Eval_DEFTData(Dataset):
 
             BDLO_vert_no_trans = construct_BDLOs_data(total_time, rigid_body_coupling_index,
                                                       n_parent_vertices, n_children_vertices,
-                                                      n_branch, parent_vertices, child1_vertices, child2_vertices)
+                                                      n_branch, parent_vertices, child1_vertices, child2_vertices,
+                                                      bdlo5=bdlo5)
             BDLO_vert = torch.zeros_like(BDLO_vert_no_trans)
             BDLO_vert[:, :, :, 0] = -BDLO_vert_no_trans[:, :, :, 2]
             BDLO_vert[:, :, :, 1] = -BDLO_vert_no_trans[:, :, :, 0]

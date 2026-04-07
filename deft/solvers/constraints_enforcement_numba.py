@@ -798,7 +798,8 @@ class constraints_enforcement_numba(nn.Module):
             coupling_index,  # e.g. [4,8]
             coupling_mass_scale,  # shape (2,2,3,3)
             selected_parent_index,  # e.g. [0]
-            selected_children_index  # e.g. [1,2]
+            selected_children_index,  # e.g. [1,2]
+            bdlo5=0
     ):
 
 
@@ -815,7 +816,17 @@ class constraints_enforcement_numba(nn.Module):
         cms_np = coupling_mass_scale
 
         # 1) Call the Numba core
-        p_upd, c_upd = _numba_coupling_core(p_np, c_np, ci_np, cms_np)
+        if bdlo5:
+            ci_c1 = np.array([ci_np[0]], dtype=np.int64)
+            cms_c1 = cms_np[0:1]
+            p_np, c1_upd = _numba_coupling_core(p_np, c_np[0:1], ci_c1, cms_c1)
+            c_np[0:1] = c1_upd
+            c_np[1, 0, :] = c1_upd[0, ci_np[1], :]
+        else:
+            p_np, c_np = _numba_coupling_core(p_np, c_np, ci_np, cms_np)
+
+        p_upd = p_np
+        c_upd = c_np
 
         # 2) Rebuild b_DLOs_vertices as in your PyTorch code:
         #    shape = (len(selected_parent_index)+ len(selected_children_index),

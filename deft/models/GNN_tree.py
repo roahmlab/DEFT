@@ -29,7 +29,8 @@ class BatchedGCNLayer(nn.Module):
 class BatchedGNNModel(nn.Module):
     def __init__(self, batch, in_features, hidden_features, out_features, n_vert, cs_n_vert, rigid_body_coupling_index,
                  clamp_parent, clamp_child1, clamp_child2, parent_clamped_selection, child1_clamped_selection, child2_clamped_selection,
-                 selected_child1_index, selected_child2_index, selected_parent_index, selected_children_index):
+                 selected_child1_index, selected_child2_index, selected_parent_index, selected_children_index,
+                 bdlo5=False):
         super(BatchedGNNModel, self).__init__()
         num_nodes = n_vert * 3
         adjacency = torch.zeros(num_nodes, num_nodes)
@@ -55,19 +56,31 @@ class BatchedGNNModel(nn.Module):
         self.selected_parent_index = selected_parent_index
         self.selected_children_index = selected_children_index
         # print("before:", adjacency.numpy())
-        for i in range(len(rigid_body_coupling_index)):
-            if i == 0:
-                adjacency[n_vert, rigid_body_coupling_index[i] - 1] = 1
-                adjacency[n_vert, rigid_body_coupling_index[i]] = 1
-                adjacency[n_vert, rigid_body_coupling_index[i] + 1] = 1
-                adjacency[rigid_body_coupling_index[i], n_vert] = 1
-                adjacency[rigid_body_coupling_index[i], n_vert + 1] = 1
-            else:
-                adjacency[n_vert * (i + 1), rigid_body_coupling_index[i] - 1] = 1
-                adjacency[n_vert * (i + 1), rigid_body_coupling_index[i]] = 1
-                adjacency[n_vert * (i + 1), rigid_body_coupling_index[i] + 1] = 1
-                adjacency[rigid_body_coupling_index[i], n_vert + cs_n_vert[i - 1]] = 1
-                adjacency[rigid_body_coupling_index[i], n_vert + cs_n_vert[i - 1] + 1] = 1
+        # Child1 always connects to parent
+        c1_parent_idx = rigid_body_coupling_index[0]
+        adjacency[n_vert, c1_parent_idx - 1] = 1
+        adjacency[n_vert, c1_parent_idx] = 1
+        adjacency[n_vert, c1_parent_idx + 1] = 1
+        adjacency[c1_parent_idx, n_vert] = 1
+        adjacency[c1_parent_idx, n_vert + 1] = 1
+
+        if bdlo5:
+            c2_on_c1_local = rigid_body_coupling_index[1]
+            c2_start = n_vert * 2
+            c1_node = n_vert + c2_on_c1_local
+            adjacency[c2_start, c1_node - 1] = 1
+            adjacency[c2_start, c1_node] = 1
+            if c1_node + 1 < n_vert + cs_n_vert[0]:
+                adjacency[c2_start, c1_node + 1] = 1
+            adjacency[c1_node, c2_start] = 1
+            adjacency[c1_node, c2_start + 1] = 1
+        else:
+            c2_parent_idx = rigid_body_coupling_index[1]
+            adjacency[n_vert * 2, c2_parent_idx - 1] = 1
+            adjacency[n_vert * 2, c2_parent_idx] = 1
+            adjacency[n_vert * 2, c2_parent_idx + 1] = 1
+            adjacency[c2_parent_idx, n_vert + cs_n_vert[0]] = 1
+            adjacency[c2_parent_idx, n_vert + cs_n_vert[0] + 1] = 1
 
         # Include self-loops in the adjacency matrix
 
