@@ -30,33 +30,47 @@ class BatchedGNNModel(nn.Module):
     def __init__(self, batch, in_features, hidden_features, out_features, n_vert, cs_n_vert, rigid_body_coupling_index,
                  clamp_parent, clamp_child1, clamp_child2, parent_clamped_selection, child1_clamped_selection, child2_clamped_selection,
                  selected_child1_index, selected_child2_index, selected_parent_index, selected_children_index,
-                 bdlo5=False):
+                 bdlo5=False, bdlo6=False, selected_child3_index=None):
         super(BatchedGNNModel, self).__init__()
-        num_nodes = n_vert * 3
+        # BDLO6 has 4 branches (parent + c1 + c2 + c3); BDLO1–5 have 3.
+        n_branch = 4 if bdlo6 else 3
+        num_nodes = n_vert * n_branch
         adjacency = torch.zeros(num_nodes, num_nodes)
         self.rigid_body_coupling_index = rigid_body_coupling_index
         self.n_vert = n_vert
+        self.bdlo6 = bdlo6
+        self.n_branch = n_branch
         hop = 1
+        # Parent rod intra-branch edges
         for i in range(n_vert - hop):
             adjacency[i, i + 1] = 1
             adjacency[i + 1, i] = 1
 
-        for i in range(n_vert, n_vert + cs_n_vert[0] - hop):  # Nodes 13 to 16
+        # Child1 intra-branch edges
+        for i in range(n_vert, n_vert + cs_n_vert[0] - hop):
             adjacency[i, i + 1] = 1
             adjacency[i + 1, i] = 1
 
-        for i in range(n_vert + n_vert, n_vert + n_vert + cs_n_vert[1] - hop):  # Nodes 18 to 20
+        # Child2 intra-branch edges
+        for i in range(n_vert + n_vert, n_vert + n_vert + cs_n_vert[1] - hop):
             adjacency[i, i + 1] = 1
             adjacency[i + 1, i] = 1
+
+        # Child3 intra-branch edges (BDLO6 only)
+        if bdlo6:
+            for i in range(n_vert * 3, n_vert * 3 + cs_n_vert[2] - hop):
+                adjacency[i, i + 1] = 1
+                adjacency[i + 1, i] = 1
 
         self.zero_mask = torch.all(adjacency == 0, dim=-1).int()
         adjacency = (adjacency + torch.eye(num_nodes)) * (1 - self.zero_mask)
         self.selected_child1_index = selected_child1_index
         self.selected_child2_index = selected_child2_index
+        self.selected_child3_index = selected_child3_index
         self.selected_parent_index = selected_parent_index
         self.selected_children_index = selected_children_index
-        # print("before:", adjacency.numpy())
-        # Child1 always connects to parent
+
+        # Child1 → parent connection
         c1_parent_idx = rigid_body_coupling_index[0]
         adjacency[n_vert, c1_parent_idx - 1] = 1
         adjacency[n_vert, c1_parent_idx] = 1
@@ -74,6 +88,21 @@ class BatchedGNNModel(nn.Module):
                 adjacency[c2_start, c1_node + 1] = 1
             adjacency[c1_node, c2_start] = 1
             adjacency[c1_node, c2_start + 1] = 1
+        elif bdlo6:
+            # BDLO6: c2 and c3 both attach directly to the parent (rigid_body_coupling_index = [2, 7, 7]).
+            c2_parent_idx = rigid_body_coupling_index[1]
+            adjacency[n_vert * 2, c2_parent_idx - 1] = 1
+            adjacency[n_vert * 2, c2_parent_idx]     = 1
+            adjacency[n_vert * 2, c2_parent_idx + 1] = 1
+            adjacency[c2_parent_idx, n_vert * 2]     = 1
+            adjacency[c2_parent_idx, n_vert * 2 + 1] = 1
+
+            c3_parent_idx = rigid_body_coupling_index[2]
+            adjacency[n_vert * 3, c3_parent_idx - 1] = 1
+            adjacency[n_vert * 3, c3_parent_idx]     = 1
+            adjacency[n_vert * 3, c3_parent_idx + 1] = 1
+            adjacency[c3_parent_idx, n_vert * 3]     = 1
+            adjacency[c3_parent_idx, n_vert * 3 + 1] = 1
         else:
             c2_parent_idx = rigid_body_coupling_index[1]
             adjacency[n_vert * 2, c2_parent_idx - 1] = 1
@@ -85,7 +114,8 @@ class BatchedGNNModel(nn.Module):
         # Include self-loops in the adjacency matrix
 
         # Batch of adjacency matrices: Shape (batch_size, num_nodes, num_nodes)
-        self.adjacency_batch = adjacency.unsqueeze(0).repeat(batch, 1, 1)
+        # Register as buffer so it moves with .to(device)
+        self.register_buffer('adjacency_batch', adjacency.unsqueeze(0).repeat(batch, 1, 1))
         self.batch = batch
         # self.gcn1 = BatchedGCNLayer(in_features-3, hidden_features)
         # self.gcn1 = BatchedGCNLayer(in_features, hidden_features)

@@ -55,6 +55,7 @@ class DEFT_func(nn.Module):
         bend_stiffness_child2,
         twist_stiffness,
         device,
+        bend_stiffness_child3=None,
     ):
         super().__init__()
 
@@ -65,16 +66,26 @@ class DEFT_func(nn.Module):
         self.device = device
         self.n_branch = n_branch
 
-        # Combine bending stiffness from parent, child1, and child2
+        # Combine bending stiffness from parent, child1, child2 (and child3 for BDLO6)
         self.bend_stiffness_parent = bend_stiffness_parent
         self.bend_stiffness_child1 = bend_stiffness_child1
         self.bend_stiffness_child2 = bend_stiffness_child2
-        self.bend_stiffness = torch.cat(
-            (self.bend_stiffness_parent,
-             self.bend_stiffness_child1,
-             self.bend_stiffness_child2),
-            dim=1
-        )
+        self.bend_stiffness_child3 = bend_stiffness_child3
+        if bend_stiffness_child3 is None:
+            self.bend_stiffness = torch.cat(
+                (self.bend_stiffness_parent,
+                 self.bend_stiffness_child1,
+                 self.bend_stiffness_child2),
+                dim=1
+            )
+        else:
+            self.bend_stiffness = torch.cat(
+                (self.bend_stiffness_parent,
+                 self.bend_stiffness_child1,
+                 self.bend_stiffness_child2,
+                 self.bend_stiffness_child3),
+                dim=1
+            )
         self.twist_stiffness = twist_stiffness
 
         # Error/stiffness thresholds for numerical stability

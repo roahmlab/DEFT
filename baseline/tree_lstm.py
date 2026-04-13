@@ -12,6 +12,22 @@ Tree topology (example BDLO1, coupling=[4, 8]):
     Child1:                     c1_0 - c1_1 - ... - c1_4   |
     Child2:                                              c2_0 - c2_1 - ... - c2_3
 
+BDLO5 chained topology (coupling=[5, 1], bdlo5=True):
+    Child2 attaches to Child1, not to parent.
+
+    Parent: v0 - ... - [v5] - ... - v11
+                          |
+    Child1:            c1_0 - [c1_1] - c1_2 - c1_3
+                                 |
+    Child2:                   c2_0 - c2_1 - c2_2 - c2_3
+
+BDLO6 topology (4 branches, coupling=[2, 7, 7]):
+    Parent: v0 - v1 - [v2] - v3 - ... - v6 - [v7] - ... - v11
+                        |                       |    |
+    Child1:          c1_0 - ... - c1_4          |    |
+    Child2:                                  c2_0 - c2_1 - c2_2
+    Child3:                                  c3_0 - c3_1 - c3_2 - c3_3
+
 Processing:
 1. Bottom-up Tree-LSTM: leaves -> root (parent vertex 0)
    - Child branches: leaf -> vertex 0 (coupling point)
@@ -88,6 +104,11 @@ class BDLOTreeLSTM(nn.Module):
 
     Given current and previous vertex positions, predicts position deltas
     for all vertices using tree-structured message passing.
+
+    Supports three topology modes:
+    - Standard (BDLO1-4): all children attach to parent vertices
+    - BDLO5 (bdlo5=True): child1 attaches to parent[5], child2 attaches to child1[1]
+    - BDLO6 (4 branches): all 3 children attach to parent vertices
     """
 
     def __init__(
@@ -97,15 +118,19 @@ class BDLOTreeLSTM(nn.Module):
         cs_n_vert,
         rigid_body_coupling_index,
         input_size=9,
+        bdlo5=False,
     ):
         """
         Args:
             hidden_size: hidden dimension for LSTM cells
             n_parent_vertices: number of vertices in parent branch
-            cs_n_vert: tuple of (n_child1_vertices, n_child2_vertices)
-            rigid_body_coupling_index: list of parent vertex indices where children attach
+            cs_n_vert: tuple of child vertex counts (2 for BDLO1-5, 3 for BDLO6)
+            rigid_body_coupling_index: list of indices where children attach.
+                For bdlo5: [parent_idx, child1_local_idx] (child2 attaches to child1)
+                Otherwise: [parent_idx, ...] for each child
             input_size: per-node input feature dimension
                         (default 9 = position(3) + velocity(3) + clamped_target_hint(3))
+            bdlo5: if True, child2 attaches to child1 instead of parent
         """
         super().__init__()
 
@@ -114,6 +139,7 @@ class BDLOTreeLSTM(nn.Module):
         self.cs_n_vert = cs_n_vert
         self.rigid_body_coupling_index = rigid_body_coupling_index
         self.n_branch = 1 + len(cs_n_vert)
+        self.bdlo5 = bdlo5
 
         # Encoder: raw features -> hidden representation
         self.encoder = nn.Sequential(
@@ -151,53 +177,102 @@ class BDLOTreeLSTM(nn.Module):
         zero_h = torch.zeros(batch, 1, self.hidden_size, device=device, dtype=dtype)
         zero_c = torch.zeros_like(zero_h)
 
-        # 1. Process child branches (leaf -> vertex 0)
-        for child_idx in range(len(self.cs_n_vert)):
-            branch_idx = child_idx + 1
-            c_n_vert = self.cs_n_vert[child_idx]
+        if self.bdlo5:
+            # BDLO5: child2 attaches to child1[coupling_index[1]], not parent.
+            # Process child2 first (leaf branch), then child1 (which merges child2).
 
-            for v in range(c_n_vert - 1, -1, -1):
-                x = encoded[:, branch_idx, v]
-                if v == c_n_vert - 1:
-                    # Leaf node: no children
+            # Process child2 (branch 2): leaf -> vertex 0
+            c2_n_vert = self.cs_n_vert[1]
+            for v in range(c2_n_vert - 1, -1, -1):
+                x = encoded[:, 2, v]
+                if v == c2_n_vert - 1:
                     ch_h, ch_c = zero_h, zero_c
                 else:
-                    # Chain node: one child (next vertex)
-                    ch_h = h_dict[(branch_idx, v + 1)].unsqueeze(1)
-                    ch_c = c_dict[(branch_idx, v + 1)].unsqueeze(1)
+                    ch_h = h_dict[(2, v + 1)].unsqueeze(1)
+                    ch_c = c_dict[(2, v + 1)].unsqueeze(1)
+                h_dict[(2, v)], c_dict[(2, v)] = self.bu_cell(x, ch_h, ch_c)
 
-                h_dict[(branch_idx, v)], c_dict[(branch_idx, v)] = self.bu_cell(
-                    x, ch_h, ch_c
-                )
+            # Process child1 (branch 1): leaf -> vertex 0, merging child2 at coupling_index[1]
+            c1_n_vert = self.cs_n_vert[0]
+            c2_attach_on_c1 = self.rigid_body_coupling_index[1]
+            for v in range(c1_n_vert - 1, -1, -1):
+                x = encoded[:, 1, v]
+                ch_h_list, ch_c_list = [], []
+                if v < c1_n_vert - 1:
+                    ch_h_list.append(h_dict[(1, v + 1)])
+                    ch_c_list.append(c_dict[(1, v + 1)])
+                # Child2 merges into child1 at this vertex
+                if v == c2_attach_on_c1:
+                    ch_h_list.append(h_dict[(2, 0)])
+                    ch_c_list.append(c_dict[(2, 0)])
+                if not ch_h_list:
+                    ch_h, ch_c = zero_h, zero_c
+                else:
+                    ch_h = torch.stack(ch_h_list, dim=1)
+                    ch_c = torch.stack(ch_c_list, dim=1)
+                h_dict[(1, v)], c_dict[(1, v)] = self.bu_cell(x, ch_h, ch_c)
 
-        # 2. Process parent branch (last vertex -> vertex 0)
-        for v in range(n_vert - 1, -1, -1):
-            x = encoded[:, 0, v]
+            # Process parent: only child1 merges at coupling_index[0]
+            for v in range(n_vert - 1, -1, -1):
+                x = encoded[:, 0, v]
+                ch_h_list, ch_c_list = [], []
+                if v < n_vert - 1:
+                    ch_h_list.append(h_dict[(0, v + 1)])
+                    ch_c_list.append(c_dict[(0, v + 1)])
+                if v == self.rigid_body_coupling_index[0]:
+                    ch_h_list.append(h_dict[(1, 0)])
+                    ch_c_list.append(c_dict[(1, 0)])
+                if not ch_h_list:
+                    ch_h, ch_c = zero_h, zero_c
+                else:
+                    ch_h = torch.stack(ch_h_list, dim=1)
+                    ch_c = torch.stack(ch_c_list, dim=1)
+                h_dict[(0, v)], c_dict[(0, v)] = self.bu_cell(x, ch_h, ch_c)
+        else:
+            # Standard topology (BDLO1-4, BDLO6): all children attach to parent
 
-            ch_h_list, ch_c_list = [], []
+            # 1. Process child branches (leaf -> vertex 0)
+            for child_idx in range(len(self.cs_n_vert)):
+                branch_idx = child_idx + 1
+                c_n_vert = self.cs_n_vert[child_idx]
 
-            # Next vertex along parent chain
-            if v < n_vert - 1:
-                ch_h_list.append(h_dict[(0, v + 1)])
-                ch_c_list.append(c_dict[(0, v + 1)])
+                for v in range(c_n_vert - 1, -1, -1):
+                    x = encoded[:, branch_idx, v]
+                    if v == c_n_vert - 1:
+                        ch_h, ch_c = zero_h, zero_c
+                    else:
+                        ch_h = h_dict[(branch_idx, v + 1)].unsqueeze(1)
+                        ch_c = c_dict[(branch_idx, v + 1)].unsqueeze(1)
 
-            # Child branches attached at this vertex
-            for child_idx, coupling_idx in enumerate(
-                self.rigid_body_coupling_index
-            ):
-                if v == coupling_idx:
-                    branch_idx = child_idx + 1
-                    ch_h_list.append(h_dict[(branch_idx, 0)])
-                    ch_c_list.append(c_dict[(branch_idx, 0)])
+                    h_dict[(branch_idx, v)], c_dict[(branch_idx, v)] = self.bu_cell(
+                        x, ch_h, ch_c
+                    )
 
-            if not ch_h_list:
-                # Leaf (last parent vertex): no children
-                ch_h, ch_c = zero_h, zero_c
-            else:
-                ch_h = torch.stack(ch_h_list, dim=1)
-                ch_c = torch.stack(ch_c_list, dim=1)
+            # 2. Process parent branch (last vertex -> vertex 0)
+            for v in range(n_vert - 1, -1, -1):
+                x = encoded[:, 0, v]
 
-            h_dict[(0, v)], c_dict[(0, v)] = self.bu_cell(x, ch_h, ch_c)
+                ch_h_list, ch_c_list = [], []
+
+                if v < n_vert - 1:
+                    ch_h_list.append(h_dict[(0, v + 1)])
+                    ch_c_list.append(c_dict[(0, v + 1)])
+
+                for child_idx, coupling_idx in enumerate(
+                    self.rigid_body_coupling_index
+                ):
+                    if v == coupling_idx:
+                        branch_idx = child_idx + 1
+                        ch_h_list.append(h_dict[(branch_idx, 0)])
+                        ch_c_list.append(c_dict[(branch_idx, 0)])
+
+                if not ch_h_list:
+                    ch_h, ch_c = zero_h, zero_c
+                else:
+                    ch_h = torch.stack(ch_h_list, dim=1)
+                    ch_c = torch.stack(ch_c_list, dim=1)
+
+                h_dict[(0, v)], c_dict[(0, v)] = self.bu_cell(x, ch_h, ch_c)
 
         # Assemble into tensors without in-place writes
         zero_state = torch.zeros(batch, self.hidden_size, device=device, dtype=dtype)
@@ -238,22 +313,52 @@ class BDLOTreeLSTM(nn.Module):
                 )
 
         # 2. Process child branches (coupling point -> leaf)
-        for child_idx in range(len(self.cs_n_vert)):
-            branch_idx = child_idx + 1
-            c_n_vert = self.cs_n_vert[child_idx]
-            coupling_idx = self.rigid_body_coupling_index[child_idx]
-
-            for v in range(c_n_vert):
-                x = encoded[:, branch_idx, v]
+        if self.bdlo5:
+            # BDLO5: child1 starts from parent, child2 starts from child1
+            # Process child1 first
+            c1_n_vert = self.cs_n_vert[0]
+            c1_coupling = self.rigid_body_coupling_index[0]  # parent vertex
+            for v in range(c1_n_vert):
+                x = encoded[:, 1, v]
                 if v == 0:
-                    # Start from parent's coupling point top-down state
-                    h_dict[(branch_idx, v)], c_dict[(branch_idx, v)] = self.td_cell(
-                        x, (h_dict[(0, coupling_idx)], c_dict[(0, coupling_idx)])
+                    h_dict[(1, v)], c_dict[(1, v)] = self.td_cell(
+                        x, (h_dict[(0, c1_coupling)], c_dict[(0, c1_coupling)])
                     )
                 else:
-                    h_dict[(branch_idx, v)], c_dict[(branch_idx, v)] = self.td_cell(
-                        x, (h_dict[(branch_idx, v - 1)], c_dict[(branch_idx, v - 1)])
+                    h_dict[(1, v)], c_dict[(1, v)] = self.td_cell(
+                        x, (h_dict[(1, v - 1)], c_dict[(1, v - 1)])
                     )
+
+            # Process child2: starts from child1's coupling vertex
+            c2_n_vert = self.cs_n_vert[1]
+            c2_coupling = self.rigid_body_coupling_index[1]  # child1 local vertex
+            for v in range(c2_n_vert):
+                x = encoded[:, 2, v]
+                if v == 0:
+                    h_dict[(2, v)], c_dict[(2, v)] = self.td_cell(
+                        x, (h_dict[(1, c2_coupling)], c_dict[(1, c2_coupling)])
+                    )
+                else:
+                    h_dict[(2, v)], c_dict[(2, v)] = self.td_cell(
+                        x, (h_dict[(2, v - 1)], c_dict[(2, v - 1)])
+                    )
+        else:
+            # Standard: all children start from parent coupling points
+            for child_idx in range(len(self.cs_n_vert)):
+                branch_idx = child_idx + 1
+                c_n_vert = self.cs_n_vert[child_idx]
+                coupling_idx = self.rigid_body_coupling_index[child_idx]
+
+                for v in range(c_n_vert):
+                    x = encoded[:, branch_idx, v]
+                    if v == 0:
+                        h_dict[(branch_idx, v)], c_dict[(branch_idx, v)] = self.td_cell(
+                            x, (h_dict[(0, coupling_idx)], c_dict[(0, coupling_idx)])
+                        )
+                    else:
+                        h_dict[(branch_idx, v)], c_dict[(branch_idx, v)] = self.td_cell(
+                            x, (h_dict[(branch_idx, v - 1)], c_dict[(branch_idx, v - 1)])
+                        )
 
         # Assemble into tensors without in-place writes
         zero_state = torch.zeros(batch, self.hidden_size, device=device, dtype=dtype)

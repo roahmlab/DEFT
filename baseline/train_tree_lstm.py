@@ -75,6 +75,24 @@ BDLO_CONFIGS = {
         "eval_n": 25,
         "parent_clamp": [0, 1, -2, -1],
     },
+    (5, "ends"): {
+        "n_parent": 12,
+        "cs_n_vert": (4, 4),
+        "coupling": [5, 1],
+        "train_n": 75,
+        "eval_n": 26,
+        "parent_clamp": [0, 1, -2, -1],
+        "bdlo5": True,
+    },
+    (6, "ends"): {
+        "n_parent": 12,
+        "cs_n_vert": (5, 3, 4),
+        "coupling": [2, 7, 7],
+        "train_n": 66,
+        "eval_n": 21,
+        "parent_clamp": [0, 1, -2, -1],
+        "n_branch": 4,
+    },
 }
 
 
@@ -133,47 +151,69 @@ def train(args):
     train_n = config["train_n"]
     eval_n = config["eval_n"]
     parent_clamp = config["parent_clamp"]
-    n_branch = 3
+    n_branch = config.get("n_branch", 3)
+    bdlo5 = config.get("bdlo5", False)
     n_children = cs_n_vert
 
     # Valid vertex mask (excludes zero-padded child vertices)
     valid_mask = create_valid_mask(n_parent, cs_n_vert, n_branch)
 
-    # Dataset key for path resolution
-    if args.clamp_type == "ends":
-        bdlo_key = args.BDLO_type
-    else:
-        bdlo_key = str(args.BDLO_type) + "_mid_clamp"
-
     # Load datasets
-    print("Loading training data...")
-    train_dataset = Train_DEFTData(
-        bdlo_key,
-        n_parent,
-        n_children,
-        n_branch,
-        coupling,
-        train_n,
-        args.total_time,
-        args.train_time_horizon,
-        args.device,
-    )
-    print(f"Training samples: {len(train_dataset)}")
+    if args.BDLO_type == 6:
+        from deft.utils.util import Train_DEFTData_BDLO6, Eval_DEFTData_BDLO6
+        print("Loading BDLO6 training data...")
+        train_dataset = Train_DEFTData_BDLO6(
+            args.total_time,
+            args.train_time_horizon,
+            args.device,
+        )
+        print(f"Training samples: {len(train_dataset)}")
 
-    print("Loading evaluation data...")
-    eval_time_horizon = args.total_time - 2
-    eval_dataset = Eval_DEFTData(
-        bdlo_key,
-        n_parent,
-        n_children,
-        n_branch,
-        coupling,
-        eval_n,
-        args.total_time,
-        eval_time_horizon,
-        args.device,
-    )
-    print(f"Evaluation samples: {len(eval_dataset)}")
+        print("Loading BDLO6 evaluation data...")
+        eval_time_horizon = args.total_time - 2
+        eval_dataset = Eval_DEFTData_BDLO6(
+            args.total_time,
+            eval_time_horizon,
+            args.device,
+        )
+        print(f"Evaluation samples: {len(eval_dataset)}")
+    else:
+        # Dataset key for path resolution
+        if args.clamp_type == "ends":
+            bdlo_key = args.BDLO_type
+        else:
+            bdlo_key = str(args.BDLO_type) + "_mid_clamp"
+
+        print("Loading training data...")
+        train_dataset = Train_DEFTData(
+            bdlo_key,
+            n_parent,
+            n_children,
+            n_branch,
+            coupling,
+            train_n,
+            args.total_time,
+            args.train_time_horizon,
+            args.device,
+            bdlo5=bdlo5,
+        )
+        print(f"Training samples: {len(train_dataset)}")
+
+        print("Loading evaluation data...")
+        eval_time_horizon = args.total_time - 2
+        eval_dataset = Eval_DEFTData(
+            bdlo_key,
+            n_parent,
+            n_children,
+            n_branch,
+            coupling,
+            eval_n,
+            args.total_time,
+            eval_time_horizon,
+            args.device,
+            bdlo5=bdlo5,
+        )
+        print(f"Evaluation samples: {len(eval_dataset)}")
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.train_batch, shuffle=True, drop_last=True
@@ -186,6 +226,7 @@ def train(args):
         cs_n_vert=cs_n_vert,
         rigid_body_coupling_index=coupling,
         input_size=9,  # position(3) + velocity(3) + clamped_target_hint(3)
+        bdlo5=bdlo5,
     )
     model = model.double()  # Match DEFT's float64 precision
     model = model.to(args.device)
@@ -223,6 +264,7 @@ def train(args):
                     parent_clamp,
                     eval_time_horizon,
                     args,
+                    n_branch=n_branch,
                 )
                 eval_losses.append(eval_loss)
                 eval_epochs.append(iteration)
@@ -329,6 +371,7 @@ def evaluate(
     parent_clamp,
     eval_time_horizon,
     args,
+    n_branch=3,
 ):
     """
     Autoregressive evaluation over the full eval time horizon.
@@ -340,7 +383,6 @@ def evaluate(
         eval_dataset, batch_size=eval_n, shuffle=False, drop_last=True
     )
     loss_func = nn.MSELoss()
-    n_branch = 3
 
     total_eval_loss = 0.0
     n_batches = 0
@@ -399,7 +441,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tree-LSTM baseline for BDLO dynamics")
 
     # Data args (match DEFT_train.py)
-    parser.add_argument("--BDLO_type", type=int, default=1, choices=[1, 2, 3, 4])
+    parser.add_argument("--BDLO_type", type=int, default=1, choices=[1, 2, 3, 4, 5, 6])
     parser.add_argument("--clamp_type", type=str, default="ends", choices=["ends", "middle"])
     parser.add_argument("--total_time", type=int, default=500)
     parser.add_argument("--train_time_horizon", type=int, default=50)

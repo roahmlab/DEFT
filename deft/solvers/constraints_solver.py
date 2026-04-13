@@ -294,7 +294,8 @@ class constraints_enforcement(nn.Module):
                                                         coupling_mass_scale, selected_parent_index,
                                                         selected_children_index, bdlo5=False,
                                                         child2_coupling_mass_scale=None,
-                                                        skip_child2_coupling=False):
+                                                        skip_child2_coupling=False,
+                                                        bdlo6=False):
         """
         Enforces inextensibility or position constraints between a 'parent' rod and a 'child' rod
         at a specific coupling index.
@@ -335,6 +336,29 @@ class constraints_enforcement(nn.Module):
                 child_vertices[c2_idx, 0] += (l2_c2 @ c2_edge.unsqueeze(-1)).view(-1, 3)
             else:
                 child_vertices[c2_idx, 0] = child_vertices[c1_idx, coupling_index[1]]
+        elif bdlo6:
+            # BDLO6: 3 children all attached to the parent (c2 and c3 share
+            # the same parent vertex). We must apply each child↔parent coupling
+            # SEQUENTIALLY because the BDLO1–4 vectorized path uses fancy-
+            # index assignment with `coupling_index = [2, 7, 7]`, which
+            # silently drops one of the duplicate-index updates.
+            batch = parent_vertices.size(0)
+            n_children = len(coupling_index)            # 3
+            # `child_vertices` arrives as [batch * n_children, n_vert, 3].
+            # Within each batch group, child slot k of the (k+1)-th branch.
+            for c_i in range(n_children):
+                p_idx = coupling_index[c_i]
+                # Indices into the flat child_vertices tensor for this child slot
+                c_rows = list(range(c_i, batch * n_children, n_children))
+                edge_to_child = child_vertices[c_rows, 0] - parent_vertices[:, p_idx]
+                # coupling_mass_scale is laid out [batch * n_children, 2, 3, 3];
+                # rows for this child are c_rows.
+                l1 = coupling_mass_scale[c_rows, 0]
+                l2 = coupling_mass_scale[c_rows, 1]
+                parent_vertices[:, p_idx] = parent_vertices[:, p_idx] + \
+                    (l1 @ edge_to_child.unsqueeze(-1)).view(-1, 3)
+                child_vertices[c_rows, 0] = child_vertices[c_rows, 0] + \
+                    (l2 @ edge_to_child.unsqueeze(-1)).view(-1, 3)
         else:
             # Vector from parent to child's first vertex
             updated_edges = child_vertices[:, 0] - parent_vertices[:, coupling_index].view(-1, 3)

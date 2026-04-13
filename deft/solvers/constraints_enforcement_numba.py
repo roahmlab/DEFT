@@ -793,13 +793,14 @@ class constraints_enforcement_numba(nn.Module):
 
     def Inextensibility_Constraint_Enforcement_Coupling(
             self,
-            parent_vertices,  # shape (1,13,3)
-            child_vertices,  # shape (2,13,3)
+            parent_vertices,  # shape (1,n_vert,3)
+            child_vertices,  # shape (n_children,n_vert,3)
             coupling_index,  # e.g. [4,8]
-            coupling_mass_scale,  # shape (2,2,3,3)
+            coupling_mass_scale,  # shape (n_children,2,3,3) — c1↔parent for bdlo5
             selected_parent_index,  # e.g. [0]
             selected_children_index,  # e.g. [1,2]
-            bdlo5=0
+            bdlo5=0,
+            child2_coupling_mass_scale=None,  # shape (1,2,3,3) — c2↔c1 for bdlo5 (mass-blended)
     ):
 
 
@@ -817,11 +818,33 @@ class constraints_enforcement_numba(nn.Module):
 
         # 1) Call the Numba core
         if bdlo5:
+            # 1a) Child1 ↔ parent (mass-blended via _numba_coupling_core)
             ci_c1 = np.array([ci_np[0]], dtype=np.int64)
             cms_c1 = cms_np[0:1]
             p_np, c1_upd = _numba_coupling_core(p_np, c_np[0:1], ci_c1, cms_c1)
             c_np[0:1] = c1_upd
-            c_np[1, 0, :] = c1_upd[0, ci_np[1], :]
+
+            # 1b) Child2 ↔ child1 (mass-blended; uses child2_coupling_mass_scale).
+            #     We re-use _numba_coupling_core by treating c1 as the "parent"
+            #     and c2 as the "child", with coupling index ci_np[1] on c1.
+            #     If child2_coupling_mass_scale is None, fall back to the old
+            #     hard-snap behavior so existing callers that don't pass it
+            #     still work.
+            if child2_coupling_mass_scale is not None:
+                ci_c2 = np.array([ci_np[1]], dtype=np.int64)
+                cms_c2 = child2_coupling_mass_scale[0:1]
+                # _numba_coupling_core expects parent shape (1, n_vert, 3) and
+                # child shape (n_children, n_vert, 3). Pass c1 as the parent
+                # and c2 as the (single) child.
+                c1_as_parent = c_np[0:1]   # shape (1, n_vert, 3)
+                c2_as_child  = c_np[1:2]   # shape (1, n_vert, 3)
+                c1_as_parent_upd, c2_upd = _numba_coupling_core(
+                    c1_as_parent, c2_as_child, ci_c2, cms_c2)
+                c_np[0:1] = c1_as_parent_upd
+                c_np[1:2] = c2_upd
+            else:
+                # Legacy hard snap (old behavior)
+                c_np[1, 0, :] = c_np[0, ci_np[1], :]
         else:
             p_np, c_np = _numba_coupling_core(p_np, c_np, ci_np, cms_np)
 

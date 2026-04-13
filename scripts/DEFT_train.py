@@ -14,6 +14,7 @@ import numpy as np
 # DEFT_sim: Simulation model class
 import sys
 import os
+import glob
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from deft.utils.util import DEFT_initialization, construct_b_DLOs, clamp_index, index_init, save_pickle, Train_DEFTData, Eval_DEFTData
@@ -25,7 +26,7 @@ import matplotlib.pyplot as plt
 
 # DEBUG: enable autograd anomaly detection so any in-place mutation that breaks
 # backward shows the forward stack trace where the offending tensor was created.
-torch.autograd.set_detect_anomaly(True)
+# torch.autograd.set_detect_anomaly(True)
 
 
 def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, inference_vis, inference_1_batch,
@@ -305,7 +306,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
 
         bend_stiffness_parent = nn.Parameter(2e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
         bend_stiffness_child1 = nn.Parameter(2e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
-        bend_stiffness_child2 = nn.Parameter(2e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        bend_stiffness_child2 = nn.Parameter(3e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
         twist_stiffness = nn.Parameter(1e-4 * torch.ones((1, n_branch, n_edge), device=device, dtype=torch.float64))
 
         damping = nn.Parameter(torch.tensor((3., 3., 3.), device=device, dtype=torch.float64))
@@ -327,6 +328,374 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         child1_clamped_selection = torch.tensor((2))
         child2_clamped_selection = torch.tensor((2))
         bdlo5 = True
+
+    if BDLO_type == 6:
+        # BDLO6 — Stage 1: undeform vis only.
+        #
+        # Topology (4 branches):
+        #   parent : 12 vertices
+        #   child1 :  4 vertices, attaches at parent[2]   (3rd vertex)
+        #   child2 :  2 vertices, attaches at parent[7]   (8th vertex)
+        #   child3 :  3 vertices, attaches at parent[7]   (8th vertex)
+        # Total stored vertices per frame: 12 + 4 + 2 + 3 = 21.
+        #
+        # We follow the BDLO1–5 convention: each assembled child[0] is forced
+        # to equal its parent attachment vertex (the dataset's raw c[0] is
+        # discarded). Both the undeformed pose and the trajectory loaders go
+        # through the same `_bdlo6_split_and_pad` helper so they always match.
+        from deft.utils.util import load_bdlo6_undeformed
+
+        # Assembled per-branch vertex counts (after prepending parent[attach]
+        # to each child, BDLO1–5-style). The dataset's raw stored counts are
+        # (4, 2, 3) for c1/c2/c3; assembled counts are (5, 3, 4).
+        n_parent_vertices = 12
+        n_child1_vertices = 5
+        n_child2_vertices = 3
+        n_child3_vertices = 4
+        n_branch_local    = 4   # parent + 3 children (don't override outer n_branch=3 used elsewhere)
+
+        # `load_bdlo6_undeformed` applies the same coord-transform pipeline
+        # (stage 1: BDLO5 swap + Rx(+90°), stage 2: Rx(-90°), stage 3: negate X)
+        # as the dataset loaders, then assembles the 4-branch padded layout.
+        b_undeformed_vert_bdlo6 = load_bdlo6_undeformed('../dataset/BDLO6_undeformed.pkl')
+
+        if undeform_vis:
+            branch_colors = ['red', 'green', 'blue', 'magenta']
+            branch_names  = ['parent', 'c1', 'c2', 'c3']
+            branch_nv     = [n_parent_vertices, n_child1_vertices, n_child2_vertices, n_child3_vertices]
+            attach_idx    = [None, 2, 7, 7]   # c1→p[2], c2→p[7], c3→p[7]
+
+            fig = plt.figure(figsize=(12, 9))
+            ax = fig.add_subplot(111, projection='3d')
+            for b_i in range(n_branch_local):
+                pts = b_undeformed_vert_bdlo6[b_i, :branch_nv[b_i]].numpy()
+                ax.plot(pts[:, 0], pts[:, 1], pts[:, 2], '-o',
+                        color=branch_colors[b_i],
+                        label=f'{branch_names[b_i]} ({branch_nv[b_i]}v)',
+                        markersize=4, linewidth=1.5)
+            # Dashed lines from each child[0] to its declared parent attachment
+            for b_i in range(1, n_branch_local):
+                cp = b_undeformed_vert_bdlo6[b_i, 0].numpy()
+                pp = b_undeformed_vert_bdlo6[0, attach_idx[b_i]].numpy()
+                ax.plot([pp[0], cp[0]], [pp[1], cp[1]], [pp[2], cp[2]],
+                        '--', color=branch_colors[b_i], linewidth=1, alpha=0.6)
+
+            # Equal-scale axes so the rod isn't visually distorted.
+            all_pts = np.concatenate([
+                b_undeformed_vert_bdlo6[b_i, :branch_nv[b_i]].numpy()
+                for b_i in range(n_branch_local)
+            ], axis=0)
+            margin = 0.05
+            mins = all_pts.min(0) - margin
+            maxs = all_pts.max(0) + margin
+            max_range = float((maxs - mins).max())
+            mids = (mins + maxs) / 2
+            ax.set_xlim(mids[0] - max_range / 2, mids[0] + max_range / 2)
+            ax.set_ylim(mids[1] - max_range / 2, mids[1] + max_range / 2)
+            ax.set_zlim(mids[2] - max_range / 2, mids[2] + max_range / 2)
+            ax.set_box_aspect((1, 1, 1))   # equal aspect ratio in matplotlib 3D
+
+            ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
+            ax.set_title('BDLO6 Undeformed reference pose')
+            ax.legend(loc='upper right', fontsize=9)
+            plt.show()
+
+        # ----------------------------------------------------------------
+        # Stage 4: BDLO6 self-contained train+eval path.
+        # All BDLO6 code lives in this block and we early-return at the
+        # end so the BDLO1–5 training loop below is never reached.
+        # Only `--training_mode physics` is supported (the GNN_tree was
+        # generalized to 4 branches but we don't have a BDLO6 residual
+        # checkpoint and `learning_weight=0` keeps the residual term off).
+        # ----------------------------------------------------------------
+        from deft.utils.util import (
+            DEFT_initialization_BDLO6,
+            Eval_DEFTData_BDLO6,
+            Train_DEFTData_BDLO6,
+            BDLO6_RIGID_BODY_COUPLING_INDEX,
+        )
+
+        if training_mode not in ("physics", "residual"):
+            raise NotImplementedError(
+                f"BDLO6 supports --training_mode physics or residual (got '{training_mode}').")
+
+        # Local hyperparameters mirroring BDLO5 defaults
+        n_vert     = n_parent_vertices
+        n_edge     = n_vert - 1
+        cs_n_vert  = (n_child1_vertices, n_child2_vertices, n_child3_vertices)
+        rigid_body_coupling_index = list(BDLO6_RIGID_BODY_COUPLING_INDEX)
+
+        # Trainable physics params for the TRAIN sim
+        bend_stiffness_parent = nn.Parameter(3e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        bend_stiffness_child1 = nn.Parameter(3e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        bend_stiffness_child2 = nn.Parameter(3e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        bend_stiffness_child3 = nn.Parameter(3e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        twist_stiffness       = nn.Parameter(1e-4 * torch.ones((1, n_branch_local, n_edge), device=device, dtype=torch.float64))
+        damping               = nn.Parameter(torch.tensor((3., 3., 3., 3.), device=device, dtype=torch.float64))
+        if residual_learning:
+            learning_weight = nn.Parameter(torch.tensor(0.1, device=device, dtype=torch.float64))
+        else:
+            learning_weight = nn.Parameter(torch.tensor(0.0, device=device, dtype=torch.float64))
+
+        # Separate eval params (fresh copies) so the eval sim doesn't hold references
+        # to the training sim's autograd graph between train/eval calls.
+        eval_bend_stiffness_parent = nn.Parameter(2e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        eval_bend_stiffness_child1 = nn.Parameter(2e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        eval_bend_stiffness_child2 = nn.Parameter(2e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        eval_bend_stiffness_child3 = nn.Parameter(2e-3 * torch.ones((1, 1, n_edge), device=device, dtype=torch.float64))
+        eval_twist_stiffness       = nn.Parameter(1e-4 * torch.ones((1, n_branch_local, n_edge), device=device, dtype=torch.float64))
+        eval_damping               = nn.Parameter(torch.tensor((3., 3., 3., 3.), device=device, dtype=torch.float64))
+        if residual_learning:
+            eval_learning_weight = nn.Parameter(torch.tensor(0.1, device=device, dtype=torch.float64))
+        else:
+            eval_learning_weight = nn.Parameter(torch.tensor(0.0, device=device, dtype=torch.float64))
+
+        parent_clamped_selection = torch.tensor((0, 1, -2, -1))
+        child1_clamped_selection = torch.tensor((2,))
+        child2_clamped_selection = torch.tensor((2,))
+
+        parent_mass_scale     = 1.
+        parent_moment_scale   = 10.
+        moment_ratio          = 0.1
+        children_moment_scale = (0.5, 0.5, 0.5)
+        children_mass_scale   = (1, 1, 1)
+
+        b_DLO_mass, parent_MOI, children_MOI, _, _, _ = DEFT_initialization_BDLO6(
+            b_undeformed_vert_bdlo6,
+            parent_mass_scale, parent_moment_scale,
+            children_moment_scale, children_mass_scale,
+            moment_ratio,
+        )
+
+        # ---- Load datasets ----
+        eval_time_horizon_local = total_time - 2
+        print("Loading BDLO6 eval dataset...")
+        eval_ds = Eval_DEFTData_BDLO6(
+            total_time=total_time,
+            eval_time_horizon=eval_time_horizon_local,
+            device=device,
+        )
+        eval_batch_local = len(eval_ds)
+        print(f"  using {eval_batch_local} eval samples")
+
+        print("Loading BDLO6 train dataset...")
+        train_ds = Train_DEFTData_BDLO6(
+            total_time=total_time,
+            training_time_horizon=train_time_horizon,
+            device=device,
+        )
+        print(f"  loaded {len(train_ds)} train windows")
+        train_loader = DataLoader(train_ds, batch_size=train_batch, shuffle=True, drop_last=True)
+
+        # ---- Build sims ----
+        index_selection1, index_selection2, parent_MOI_index1, parent_MOI_index2 = index_init(
+            rigid_body_coupling_index, n_branch_local)
+
+        clamped_index_train, parent_theta_clamp_local, child1_theta_clamp_local, child2_theta_clamp_local = clamp_index(
+            train_batch,
+            parent_clamped_selection, child1_clamped_selection, child2_clamped_selection,
+            n_branch_local, n_parent_vertices,
+            True, False, False,
+        )
+        clamped_index_eval, _, _, _ = clamp_index(
+            eval_batch_local,
+            parent_clamped_selection, child1_clamped_selection, child2_clamped_selection,
+            n_branch_local, n_parent_vertices,
+            True, False, False,
+        )
+
+        b_undeformed_vert_for_sim = b_undeformed_vert_bdlo6.view(n_branch_local, -1, 3)
+
+        def _build_sim(batch_size, clamped_idx, _bend_p, _bend_c1, _bend_c2, _bend_c3, _twist, _damp, _lw):
+            return DEFT_sim(
+                batch=batch_size,
+                n_branch=n_branch_local,
+                n_vert=n_vert,
+                cs_n_vert=cs_n_vert,
+                b_init_n_vert=b_undeformed_vert_for_sim,
+                n_edge=n_edge,
+                b_undeformed_vert=b_undeformed_vert_for_sim,
+                b_DLO_mass=b_DLO_mass,
+                parent_DLO_MOI=parent_MOI,
+                children_DLO_MOI=children_MOI,
+                device=device,
+                clamped_index=clamped_idx,
+                rigid_body_coupling_index=rigid_body_coupling_index,
+                parent_MOI_index1=parent_MOI_index1,
+                parent_MOI_index2=parent_MOI_index2,
+                parent_clamped_selection=parent_clamped_selection,
+                child1_clamped_selection=child1_clamped_selection,
+                child2_clamped_selection=child2_clamped_selection,
+                clamp_parent=True, clamp_child1=False, clamp_child2=False,
+                index_selection1=index_selection1,
+                index_selection2=index_selection2,
+                bend_stiffness_parent=_bend_p,
+                bend_stiffness_child1=_bend_c1,
+                bend_stiffness_child2=_bend_c2,
+                bend_stiffness_child3=_bend_c3,
+                twist_stiffness=_twist,
+                damping=_damp,
+                learning_weight=_lw,
+                use_orientation_constraints=True,
+                use_attachment_constraints=True,
+                bdlo5=False,
+                bdlo6=True,
+            )
+
+        sim_train = _build_sim(train_batch, clamped_index_train,
+                               bend_stiffness_parent, bend_stiffness_child1,
+                               bend_stiffness_child2, bend_stiffness_child3,
+                               twist_stiffness, damping, learning_weight)
+        sim_eval  = _build_sim(eval_batch_local, clamped_index_eval,
+                               eval_bend_stiffness_parent, eval_bend_stiffness_child1,
+                               eval_bend_stiffness_child2, eval_bend_stiffness_child3,
+                               eval_twist_stiffness, eval_damping, eval_learning_weight)
+
+        # ---- Load pretrained checkpoint if requested ----
+        if load_model:
+            pretrained_path = "../save_model/BDLO6/DEFT_ends_6_pretrained_wo_residual.pth"
+            if os.path.exists(pretrained_path):
+                pretrained_dict = torch.load(pretrained_path)
+                pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'adjacency_batch' not in k}
+                sim_train.load_state_dict(pretrained_dict, strict=False)
+                print(f"Loaded BDLO6 pretrained model from {pretrained_path}")
+            else:
+                print(f"WARNING: pretrained checkpoint not found: {pretrained_path}")
+
+        # ---- Optimizer ----
+        lr_scale = 10
+        physics_params = [
+            {"params": sim_train.p_DLO_diagonal,                   "lr": 1e-6 * lr_scale},
+            {"params": sim_train.c_DLO_diagonal,                   "lr": 1e-6 * lr_scale},
+            {"params": sim_train.integration_ratio,                "lr": 1e-6 * lr_scale},
+            {"params": sim_train.velocity_ratio,                   "lr": 1e-6 * lr_scale},
+            {"params": sim_train.undeformed_vert,                  "lr": 1e-6 * lr_scale},
+            {"params": sim_train.mass_diagonal,                    "lr": 1e-6 * lr_scale},
+            {"params": sim_train.damping,                          "lr": 1e-6 * lr_scale},
+            {"params": sim_train.gravity,                          "lr": 1e-6 * lr_scale},
+            {"params": sim_train.DEFT_func.twist_stiffness,        "lr": 1e-6 * lr_scale},
+            {"params": sim_train.DEFT_func.bend_stiffness_parent,  "lr": 1e-8 * lr_scale},
+            {"params": sim_train.DEFT_func.bend_stiffness_child1,  "lr": 1e-8 * lr_scale},
+            {"params": sim_train.DEFT_func.bend_stiffness_child2,  "lr": 1e-8 * lr_scale},
+            {"params": sim_train.DEFT_func.bend_stiffness_child3,  "lr": 1e-8 * lr_scale},
+        ]
+        residual_params = [
+            {"params": sim_train.GNN_tree.parameters(), "lr": 1e-5 * lr_scale},
+            {"params": [sim_train.learning_weight],     "lr": 1e-4 * lr_scale},
+        ]
+
+        if training_mode == "physics":
+            # Freeze GNN, train physics only
+            for p in sim_train.GNN_tree.parameters():
+                p.requires_grad = False
+            sim_train.learning_weight.requires_grad = False
+            optimizer = optim.Adam(physics_params, eps=1e-8)
+            print("BDLO6 training mode: physics only (GNN frozen)")
+        elif training_mode == "residual":
+            # Freeze physics, train GNN only
+            sim_train.p_DLO_diagonal.requires_grad = False
+            sim_train.c_DLO_diagonal.requires_grad = False
+            sim_train.integration_ratio.requires_grad = False
+            sim_train.velocity_ratio.requires_grad = False
+            sim_train.undeformed_vert.requires_grad = False
+            sim_train.mass_diagonal.requires_grad = False
+            sim_train.damping.requires_grad = False
+            sim_train.gravity.requires_grad = False
+            sim_train.DEFT_func.twist_stiffness.requires_grad = False
+            sim_train.DEFT_func.bend_stiffness_parent.requires_grad = False
+            sim_train.DEFT_func.bend_stiffness_child1.requires_grad = False
+            sim_train.DEFT_func.bend_stiffness_child2.requires_grad = False
+            sim_train.DEFT_func.bend_stiffness_child3.requires_grad = False
+            optimizer = optim.Adam(residual_params, eps=1e-8)
+            print("BDLO6 training mode: residual only (physics frozen)")
+
+        loss_func = torch.nn.MSELoss()
+        dt = 0.01
+        eval_loader = DataLoader(eval_ds, batch_size=eval_batch_local, shuffle=False, drop_last=True)
+
+        # ---- Bookkeeping for losses / checkpoints ----
+        save_steps = 0
+        evaluate_period = 20
+        training_iteration = 0
+        training_case = 1
+        train_epoch_count = 100
+        train_losses_log = []
+        eval_losses_log  = []
+        eval_iters_log   = []
+
+        os.makedirs("../save_model", exist_ok=True)
+        os.makedirs("../training_record", exist_ok=True)
+
+        def run_eval(vis_this_eval):
+            """Sync sim_eval state from sim_train, run full eval pass, return mean RMSE."""
+            state = {k: v for k, v in sim_train.state_dict().items() if 'adjacency_batch' not in k}
+            sim_eval.load_state_dict(state, strict=False)
+            with torch.no_grad():
+                rmses = []
+                for prev, curr, target in eval_loader:
+                    traj_loss_eval, _ = sim_eval.iterative_sim(
+                        eval_time_horizon_local,
+                        curr, prev, target,
+                        loss_func, dt,
+                        parent_theta_clamp_local, child1_theta_clamp_local, child2_theta_clamp_local,
+                        False,                          # inference_1_batch
+                        vis_type="DEFT_6",
+                        vis=vis_this_eval,
+                    )
+                    rmses.append(float(np.sqrt(traj_loss_eval.cpu().numpy() / total_time)))
+            return float(np.mean(rmses))
+
+        # ---- Main train loop ----
+        for epoch in range(train_epoch_count):
+            bar = tqdm(train_loader, desc=f"BDLO6 epoch {epoch}")
+            for data in bar:
+                # Periodic eval (and at step 0, before any training)
+                if save_steps % evaluate_period == 0:
+                    ckpt_path = "../save_model/DEFT_%s_6_%s_%s.pth" % (
+                        clamp_type, str(training_iteration), training_case)
+                    torch.save(sim_train.state_dict(), ckpt_path)
+                    vis_this_eval = inference_vis if training_iteration == 0 else False
+                    eval_rmse = run_eval(vis_this_eval=vis_this_eval)
+                    print(f"  [step {training_iteration}] eval RMSE: {eval_rmse:.6f}  (ckpt: {ckpt_path})")
+                    eval_losses_log.append(eval_rmse)
+                    eval_iters_log.append(training_iteration)
+                    save_pickle(eval_losses_log,
+                                "../training_record/eval_%s_loss_DEFT_%s_6.pkl" % (clamp_type, training_case))
+                    save_pickle(eval_iters_log,
+                                "../training_record/eval_%s_epoches_DEFT_%s_6.pkl" % (clamp_type, training_case))
+
+                save_steps += 1
+                training_iteration += 1
+
+                prev_b, curr_b, target_b, _mu0 = data
+                traj_loss, total_loss = sim_train.iterative_sim(
+                    train_time_horizon,
+                    curr_b, prev_b, target_b,
+                    loss_func, dt,
+                    parent_theta_clamp_local, child1_theta_clamp_local, child2_theta_clamp_local,
+                    inference_1_batch,
+                    vis_type="DEFT_6",
+                    vis=False,
+                )
+
+                if torch.isnan(total_loss) or torch.isinf(total_loss):
+                    print(f"NaN/Inf at iter {training_iteration}, skipping batch")
+                    optimizer.zero_grad()
+                    continue
+
+                train_losses_log.append(float(traj_loss.cpu().detach().numpy()) / train_time_horizon)
+                bar.set_postfix(loss=train_losses_log[-1])
+
+                total_loss.backward(retain_graph=True)
+                torch.nn.utils.clip_grad_norm_(sim_train.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+
+                save_pickle(train_losses_log,
+                            "../training_record/train_%s_loss_DEFT_%s_6.pkl" % (clamp_type, training_case))
+
+        print("BDLO6 training done.")
+        return
 
     # Decide how many batches we use in evaluation (1 batch if inference_1_batch is True, else the entire eval_set_number)
     if inference_1_batch:
@@ -501,53 +870,29 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
     )
 
     # Load pretrained models for initialization depending on BDLO_type and clamp_type
-    # If residual_learning is on, load full model (physics + GNN);
-    # If residual_learning is off, load only physics parameters (not GNN)
+    # Always loads full model (physics + GNN) when available
     if load_model:
         pretrained_path = None
-        if residual_learning:
-            # Load full model including GNN weights
-            if BDLO_type == 1 and clamp_type == "ends":
-                pretrained_path = "../save_model/BDLO1/DEFT_ends_1_pretrained_full_model.pth"
-            if BDLO_type == 1 and clamp_type == "middle":
-                pretrained_path = "../save_model/BDLO1/DEFT_middle_1_pretrained_full_model.pth"
-            if BDLO_type == 2:
-                pretrained_path = "../save_model/BDLO2/DEFT_ends_2_pretrained_full_model.pth"
-            if BDLO_type == 3 and clamp_type == "ends":
-                pretrained_path = "../save_model/BDLO3/DEFT_ends_3_pretrained_full_model.pth"
-            if BDLO_type == 3 and clamp_type == "middle":
-                pretrained_path = "../save_model/BDLO3/DEFT_middle_3_pretrained_full_model.pth"
-            if BDLO_type == 4:
-                pretrained_path = "../save_model/BDLO4/DEFT_ends_4_pretrained_full_model.pth"
+        if BDLO_type == 1 and clamp_type == "ends":
+            pretrained_path = "../save_model/BDLO1/DEFT_ends_1_pretrained_full_model.pth"
+        if BDLO_type == 1 and clamp_type == "middle":
+            pretrained_path = "../save_model/BDLO1/DEFT_middle_1_pretrained_full_model.pth"
+        if BDLO_type == 2:
+            pretrained_path = "../save_model/BDLO2/DEFT_ends_2_pretrained_full_model.pth"
+        if BDLO_type == 3 and clamp_type == "ends":
+            pretrained_path = "../save_model/BDLO3/DEFT_ends_3_pretrained_full_model.pth"
+        if BDLO_type == 3 and clamp_type == "middle":
+            pretrained_path = "../save_model/BDLO3/DEFT_middle_3_pretrained_full_model.pth"
+        if BDLO_type == 4:
+            pretrained_path = "../save_model/BDLO4/DEFT_ends_4_pretrained_full_model.pth"
+        if BDLO_type == 5:
+            pretrained_path = "../save_model/BDLO5/DEFT_ends_5_pretrained_full_model.pth"
 
-            if pretrained_path is not None:
-                pretrained_dict = torch.load(pretrained_path)
-                DEFT_sim_train.load_state_dict(pretrained_dict)
-                print(f"Loaded full model from {pretrained_path}")
-        else:
-            # Load only physics parameters (not GNN) since GNN is not used without residual learning
-            if BDLO_type == 1 and clamp_type == "ends":
-                pretrained_path = "../save_model/BDLO1/DEFT_ends_1_pretrained_wo_residual.pth"
-            if BDLO_type == 1 and clamp_type == "middle":
-                pretrained_path = "../save_model/BDLO1/DEFT_middle_1_pretrained_wo_residual.pth"
-            if BDLO_type == 2:
-                pretrained_path = "../save_model/BDLO2/DEFT_ends_2_pretrained_wo_residual.pth"
-            if BDLO_type == 3 and clamp_type == "ends":
-                pretrained_path = "../save_model/BDLO3/DEFT_ends_3_pretrained_wo_residual.pth"
-            if BDLO_type == 3 and clamp_type == "middle":
-                pretrained_path = "../save_model/BDLO3/DEFT_middle_3_pretrained_wo_residual.pth"
-            if BDLO_type == 4:
-                pretrained_path = "../save_model/BDLO4/DEFT_ends_4_pretrained_wo_residual.pth"
-
-            if pretrained_path is not None:
-                pretrained_dict = torch.load(pretrained_path)
-                model_dict = DEFT_sim_train.state_dict()
-                # Only keep non-GNN parameters from pretrained
-                pretrained_dict_filtered = {k: v for k, v in pretrained_dict.items()
-                                           if k in model_dict and not k.startswith('GNN_tree.')}
-                model_dict.update(pretrained_dict_filtered)
-                DEFT_sim_train.load_state_dict(model_dict)
-                print(f"Loaded physics parameters from {pretrained_path} (GNN initialized from scratch)")
+        if pretrained_path is not None:
+            pretrained_dict = torch.load(pretrained_path)
+            pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'adjacency_batch' not in k}
+            DEFT_sim_train.load_state_dict(pretrained_dict, strict=False)
+            print(f"Loaded full model from {pretrained_path}")
     
     # If we want to visualize the undeformed states
     if undeform_vis:
@@ -743,10 +1088,10 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
                         clamp_type, BDLO_type, str(training_iteration), training_case))
                     )
                     # Load the saved model into the evaluation simulation object
-                    DEFT_sim_eval.load_state_dict(
-                        torch.load("../save_model/DEFT_%s_%s_%s_%s.pth" % (
+                    saved = torch.load("../save_model/DEFT_%s_%s_%s_%s.pth" % (
                         clamp_type, BDLO_type, str(training_iteration), training_case))
-                    )
+                    saved = {k: v for k, v in saved.items() if 'adjacency_batch' not in k}
+                    DEFT_sim_eval.load_state_dict(saved, strict=False)
 
                     eval_bar = tqdm(eval_data_loader)
                     with torch.no_grad():

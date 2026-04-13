@@ -966,6 +966,114 @@ def visualize_tensors_3d_in_same_plot_no_zeros(
     plt.close(fig)
 
 
+def visualize_bdlo6_3d(
+        parent_clamped_selection,
+        parent_pred, children_pred_list,
+        parent_gt,   children_gt_list,
+        ith, i_eval_batch, vis_type,
+        clamp_parent=True, parent_fix_point=None,
+        xlim=None, ylim=None, zlim=None,
+):
+    """
+    BDLO6-specific 3D visualizer (4-branch parent + 3 children). Mirrors the
+    layout of `visualize_tensors_3d_in_same_plot_no_zeros` but takes a list of
+    children predictions and a list of children ground truths so we can render
+    all 4 branches.
+
+    Args:
+        parent_pred:        [n_vert, 3] predicted parent vertices
+        children_pred_list: list of 3 tensors, each [n_vert, 3] (predicted c1, c2, c3)
+        parent_gt:          [n_vert, 3] ground-truth parent vertices for this frame
+        children_gt_list:   list of 3 tensors, each [n_vert, 3] (GT c1, c2, c3,
+                            already prepended with parent[attach] so each child
+                            polyline starts at its parent attachment point)
+        ith, i_eval_batch, vis_type: file path components
+        clamp_parent, parent_fix_point: clamp visualization (parent only)
+
+    Returns:
+        None. Saves a .png file under sanity_check/{vis_type}/{i_eval_batch}/{ith}.png
+    """
+    def filter_non_zero_points(t):
+        if t is None:
+            return None
+        mask = torch.any(t != 0, dim=-1)
+        return t[mask]
+
+    fig = plt.figure(figsize=(16, 8))
+    ax1 = fig.add_subplot(121, projection='3d'); ax1.set_title('View 1')
+    ax2 = fig.add_subplot(122, projection='3d'); ax2.set_title('View 2')
+
+    child_colors = ['green', 'blue', 'magenta']
+
+    def plot_tensors(ax):
+        # ---- Ground truth (black) ----
+        gt_parent = filter_non_zero_points(parent_gt)
+        if gt_parent is not None and gt_parent.size(0) > 0:
+            ax.plot(gt_parent[:, 0].detach().cpu().numpy(),
+                    gt_parent[:, 1].detach().cpu().numpy(),
+                    gt_parent[:, 2].detach().cpu().numpy(),
+                    '-o', c='black', markersize=4, label='GT parent')
+        for i, gt_c in enumerate(children_gt_list):
+            gt_c_f = filter_non_zero_points(gt_c)
+            if gt_c_f is not None and gt_c_f.size(0) > 0:
+                ax.plot(gt_c_f[:, 0].detach().cpu().numpy(),
+                        gt_c_f[:, 1].detach().cpu().numpy(),
+                        gt_c_f[:, 2].detach().cpu().numpy(),
+                        '-o', c='black', markersize=3, alpha=0.6)
+
+        # ---- Prediction (parent red, children colored) ----
+        N = parent_pred.shape[0]
+        sel = parent_clamped_selection % N
+        sel = np.unique(sel)
+        nonsel = np.setdiff1d(np.arange(N), sel)
+
+        pp_nonsel = filter_non_zero_points(parent_pred[nonsel])
+        if pp_nonsel is not None and pp_nonsel.size(0) > 0:
+            ax.scatter(pp_nonsel[:, 0].detach().cpu().numpy(),
+                       pp_nonsel[:, 1].detach().cpu().numpy(),
+                       pp_nonsel[:, 2].detach().cpu().numpy(),
+                       c='red', s=30, label='Pred parent')
+        pp_sel = filter_non_zero_points(parent_pred[sel])
+        if pp_sel is not None and pp_sel.size(0) > 0:
+            ax.scatter(pp_sel[:, 0].detach().cpu().numpy(),
+                       pp_sel[:, 1].detach().cpu().numpy(),
+                       pp_sel[:, 2].detach().cpu().numpy(),
+                       c='red', s=50, marker='s', label='Pred parent (clamped)')
+
+        for i, c_pred in enumerate(children_pred_list):
+            c_f = filter_non_zero_points(c_pred)
+            if c_f is not None and c_f.size(0) > 0:
+                ax.scatter(c_f[:, 0].detach().cpu().numpy(),
+                           c_f[:, 1].detach().cpu().numpy(),
+                           c_f[:, 2].detach().cpu().numpy(),
+                           c=child_colors[i], s=30, label=f'Pred c{i+1}')
+
+        if clamp_parent and parent_fix_point is not None:
+            fp = filter_non_zero_points(parent_fix_point)
+            if fp is not None and fp.size(0) > 0:
+                ax.scatter(fp[:, 0].detach().cpu().numpy(),
+                           fp[:, 1].detach().cpu().numpy(),
+                           fp[:, 2].detach().cpu().numpy(),
+                           c='red', s=60, marker='x')
+
+        if xlim is not None: ax.set_xlim(*xlim)
+        if ylim is not None: ax.set_ylim(*ylim)
+        if zlim is not None: ax.set_zlim(*zlim)
+        ax.set_box_aspect((1, 1, 1))   # equal aspect ratio
+        ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
+        ax.legend(loc='upper right', fontsize=7)
+
+    plot_tensors(ax1)
+    plot_tensors(ax2)
+    ax1.view_init(elev=0,  azim=90)
+    ax2.view_init(elev=30, azim=-45)
+
+    dir_path = Path(f"sanity_check/{vis_type}/{i_eval_batch}")
+    dir_path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(f"sanity_check/{vis_type}/{i_eval_batch}/{ith}.png")
+    plt.close(fig)
+
+
 def save_pickle(data, myfile):
     """
     Saves data to a pickle file.
@@ -1145,6 +1253,368 @@ class Eval_DEFTData(Dataset):
         previous_vertices = torch.tensor(self.previous_vertices[index]).to(self.device)
         vertices = torch.tensor(self.vertices[index]).to(self.device)
         target_vertices = torch.tensor(self.target_vertices[index]).to(self.device)
+        return (previous_vertices.clone().detach(),
+                vertices.clone().detach(),
+                target_vertices.clone().detach())
+
+
+# ============================================================================
+# BDLO6 dataset support (separate from the BDLO1–5 path; nothing above this
+# line is touched). BDLO6 has 4 branches: parent(12) + c1(4) + c2(2) + c3(3),
+# all 21 vertices stored independently with no shared coupling vertex.
+# ============================================================================
+
+# BDLO6 fixed topology constants.
+#
+# The BDLO6 dataset stores 21 raw vertices per frame: 12 for the parent and
+# (4, 2, 3) for c1/c2/c3 respectively. We follow the BDLO1–5 convention of
+# *prepending* each child's parent-attachment vertex during construction, so
+# the *assembled* child rod has one more vertex than the raw stored count.
+# All raw vertices are preserved (nothing dropped).
+_BDLO6_N_PARENT     = 12
+_BDLO6_N_C1_RAW     = 4
+_BDLO6_N_C2_RAW     = 2
+_BDLO6_N_C3_RAW     = 3
+_BDLO6_N_C1         = _BDLO6_N_C1_RAW + 1   # 5  (1 prepended parent[attach])
+_BDLO6_N_C2         = _BDLO6_N_C2_RAW + 1   # 3
+_BDLO6_N_C3         = _BDLO6_N_C3_RAW + 1   # 4
+_BDLO6_N_BRANCH     = 4
+# Parent attachment vertex for each child (0-indexed). c1 attaches at parent[2]
+# (3rd vertex), c2 and c3 both attach at parent[7] (8th vertex).
+BDLO6_RIGID_BODY_COUPLING_INDEX = (2, 7, 7)
+
+
+def apply_bdlo6_transform_undeformed(verts):
+    """
+    BDLO6 *undeformed-pose* coordinate transform. The undeformed pkl is in a
+    different raw frame than the trajectory pkls, so it needs a different
+    composed transform. Mirrors the staged transform used in
+    `scripts/DEFT_train.py`'s BDLO6 block:
+        stage 1: BDLO5 swap (x↔z) + Rx(+90°)  → (x, y, z) → (z, -x,  y)
+        stage 2: Rx(-90°)                       → (x, y, z) → (x,  z, -y)
+        stage 3: negate X                       → (x, y, z) → (-x, y,  z)
+        composed                                → (x, y, z) → (-z, y,  x)
+
+    `verts` is any torch.Tensor with shape `[..., 3]`. Only the last axis is
+    permuted; the rest of the shape is preserved. Returns a new tensor.
+    """
+    out = torch.zeros_like(verts)
+    out[..., 0] = -verts[..., 2]
+    out[..., 1] =  verts[..., 1]
+    out[..., 2] =  verts[..., 0]
+    return out
+
+
+def apply_bdlo6_transform_trajectory(verts):
+    """
+    BDLO6 *trajectory* coordinate transform — only stage 1 of the BDLO6
+    pipeline (the same one `scripts/visualize_bdlo6_data.py` used to render
+    the original video the user verified):
+        (x, y, z) → (z, -x, y)
+    Equivalent to BDLO5 swap (x↔z) followed by Rx(+90°).
+    """
+    out = torch.zeros_like(verts)
+    out[..., 0] =  verts[..., 2]
+    out[..., 1] = -verts[..., 0]
+    out[..., 2] =  verts[..., 1]
+    return out
+
+
+def _bdlo6_split_and_pad(verts):
+    """
+    Take a tensor of raw BDLO6 vertices `[time, 21, 3]` (or `[21, 3]` for the
+    undeformed case) and pack it into a `[time, 4, 12, 3]` (or `[4, 12, 3]`)
+    layout where each branch is padded to 12 vertices.
+
+    Convention (matches BDLO1–5): each assembled child rod is built by
+    *prepending* the parent-attachment vertex to the dataset's raw child
+    vertices. **No raw vertices are dropped.** Assembled lengths are
+    `(_BDLO6_N_C1_RAW + 1, _BDLO6_N_C2_RAW + 1, _BDLO6_N_C3_RAW + 1)`
+    = (5, 3, 4).
+    """
+    is_time = (verts.dim() == 3)
+    if not is_time:
+        verts = verts.unsqueeze(0)              # [1, 21, 3]
+    T = verts.size(0)
+    out = torch.zeros(T, _BDLO6_N_BRANCH, _BDLO6_N_PARENT, 3, dtype=verts.dtype)
+
+    # Parent: copy as-is.
+    parent = verts[:, 0:_BDLO6_N_PARENT]                                     # [T, 12, 3]
+    out[:, 0, :_BDLO6_N_PARENT] = parent
+
+    # Slice the raw children out of the 21-vert layout (still using the RAW
+    # per-child vertex counts, not the assembled ones).
+    raw_c1 = verts[:, _BDLO6_N_PARENT:_BDLO6_N_PARENT + _BDLO6_N_C1_RAW]
+    raw_c2 = verts[:, _BDLO6_N_PARENT + _BDLO6_N_C1_RAW:
+                       _BDLO6_N_PARENT + _BDLO6_N_C1_RAW + _BDLO6_N_C2_RAW]
+    raw_c3 = verts[:, _BDLO6_N_PARENT + _BDLO6_N_C1_RAW + _BDLO6_N_C2_RAW:]
+
+    # c1 (5 verts): [parent[2], raw_c1[0], raw_c1[1], raw_c1[2], raw_c1[3]]
+    out[:, 1, 0]                          = parent[:, BDLO6_RIGID_BODY_COUPLING_INDEX[0]]
+    out[:, 1, 1:1 + _BDLO6_N_C1_RAW]      = raw_c1
+
+    # c2 (3 verts): [parent[7], raw_c2[0], raw_c2[1]]
+    out[:, 2, 0]                          = parent[:, BDLO6_RIGID_BODY_COUPLING_INDEX[1]]
+    out[:, 2, 1:1 + _BDLO6_N_C2_RAW]      = raw_c2
+
+    # c3 (4 verts): [parent[7], raw_c3[0], raw_c3[1], raw_c3[2]]
+    out[:, 3, 0]                          = parent[:, BDLO6_RIGID_BODY_COUPLING_INDEX[2]]
+    out[:, 3, 1:1 + _BDLO6_N_C3_RAW]      = raw_c3
+
+    if not is_time:
+        out = out.squeeze(0)                    # [4, 12, 3]
+    return out
+
+
+def load_bdlo6_undeformed(pkl_path):
+    """
+    Load the BDLO6 undeformed reference pose from a pickle file containing a
+    `(3, 21)` array (xyz × n_vertices), apply the *undeformed* coord transform,
+    and return a `[4, 12, 3]` padded layout.
+    """
+    arr = pd.read_pickle(pkl_path)              # tuple/ndarray, shape (3, 21)
+    verts = torch.tensor(np.array(arr)).permute(1, 0)   # [21, 3]
+    verts = apply_bdlo6_transform_undeformed(verts)
+    return _bdlo6_split_and_pad(verts)          # [4, 12, 3]
+
+
+def _load_bdlo6_trajectory_pkl(pkl_path, total_time):
+    """
+    Load a single BDLO6 trajectory pickle and return the transformed,
+    branch-padded tensor `[total_time, 4, 12, 3]`.
+
+    The .pkl stores a `(3, total_time * 21)` array — the same convention as
+    BDLO1–5 datasets, just with 21 vertices instead of 18/20. The trajectory
+    pkls live in a different raw coordinate frame than the undeformed pkl, so
+    we use `apply_bdlo6_transform_trajectory` here (NOT the undeformed one).
+    """
+    arr = pd.read_pickle(pkl_path)              # tuple/ndarray
+    verts = torch.tensor(np.array(arr)).view(3, total_time, -1).permute(1, 2, 0)
+    # verts: [total_time, 21, 3] in raw coord frame
+    verts = apply_bdlo6_transform_trajectory(verts)
+    return _bdlo6_split_and_pad(verts)          # [total_time, 4, 12, 3]
+
+
+class Train_DEFTData_BDLO6(Dataset):
+    """
+    PyTorch Dataset for BDLO6 *training* data. Mirrors the interface of
+    `Train_DEFTData` so it can drop into the same training loop:
+        __getitem__ returns (previous, current, target, mu_0) where each
+        of previous/current/target is `[training_time_horizon, 4, 12, 3]`.
+    """
+
+    def __init__(self, total_time, training_time_horizon, device,
+                 root_dir="../dataset/BDLO6/train/"):
+        super().__init__()
+        self.device = device
+        file_list = sorted(glob.glob(root_dir + "*"))
+
+        self.BDLOs_previous_vertices = []
+        self.BDLOs_vertices          = []
+        self.BDLOs_target_vertices   = []
+        self.mu_0 = []
+
+        for rope_data in tqdm(file_list, desc="Loading BDLO6 train"):
+            BDLO_vert = _load_bdlo6_trajectory_pkl(rope_data, total_time)
+            mu_0_list = torch.zeros(total_time - 2, _BDLO6_N_BRANCH, 3, device=self.device)
+
+            for i in range(total_time - 1 - training_time_horizon):
+                window = BDLO_vert[i: i + training_time_horizon]
+                if window.size() != (training_time_horizon, _BDLO6_N_BRANCH, _BDLO6_N_PARENT, 3):
+                    print("False Size")
+                self.BDLOs_previous_vertices.append(window.numpy())
+                self.BDLOs_vertices.append(BDLO_vert[i + 1: i + 1 + training_time_horizon].numpy())
+                self.BDLOs_target_vertices.append(BDLO_vert[i + 2: i + 2 + training_time_horizon].numpy())
+                self.mu_0.append(mu_0_list[i: i + training_time_horizon])
+
+        self.previous_vertices = np.array(self.BDLOs_previous_vertices)
+        self.vertices          = np.array(self.BDLOs_vertices)
+        self.target_vertices   = np.array(self.BDLOs_target_vertices)
+
+    def __len__(self):
+        return len(self.vertices)
+
+    def __getitem__(self, index):
+        previous_vertices = torch.tensor(self.previous_vertices[index]).to(self.device)
+        vertices          = torch.tensor(self.vertices[index]).to(self.device)
+        target_vertices   = torch.tensor(self.target_vertices[index]).to(self.device)
+        return (previous_vertices.clone().detach(),
+                vertices.clone().detach(),
+                target_vertices.clone().detach(),
+                self.mu_0[index].clone().detach())
+
+
+def DEFT_initialization_BDLO6(b_undeformed_vert,
+                              parent_mass_scale, parent_moment_scale,
+                              children_moment_scale, children_mass_scale,
+                              moment_ratio):
+    """
+    BDLO6-specific initialization. Computes mass, MOI, rod orientations and
+    nominal lengths for the 4-branch (parent + 3 children) topology.
+
+    `b_undeformed_vert` is the `[4, 12, 3]` padded layout produced by
+    `load_bdlo6_undeformed` (each `child[0]` already equals the parent
+    attachment vertex).
+
+    `children_moment_scale` and `children_mass_scale` are 3-tuples (one entry
+    per child).
+
+    Returns the same 6-tuple shape as `DEFT_initialization`:
+        b_DLO_mass, parent_MOI, children_MOI,
+        parent_rod_orientation, children_rod_orientation, b_nominal_length
+    """
+    cs_n_vert = (_BDLO6_N_C1, _BDLO6_N_C2, _BDLO6_N_C3)
+    n_branch = _BDLO6_N_BRANCH
+    p_n_vert = _BDLO6_N_PARENT
+    rigid_body_coupling_index = list(BDLO6_RIGID_BODY_COUPLING_INDEX)
+
+    # Parent: nominal edge length, radius, mass distribution
+    parent_v = b_undeformed_vert[0:1, :p_n_vert]                       # [1, 12, 3]
+    parent_nominal_length = torch.norm(parent_v[:, 1:] - parent_v[:, :-1], dim=-1)[0]
+    parent_nominal_radius = parent_nominal_length * moment_ratio
+
+    p_DLO_mass = torch.zeros(p_n_vert)
+    p_DLO_mass[0:p_n_vert - 1] += parent_nominal_length / 2.
+    p_DLO_mass[1:p_n_vert]     += parent_nominal_length / 2.
+    p_DLO_mass = p_DLO_mass * parent_mass_scale
+
+    # Placeholders matching the BDLO1–5 layout: parent_MOI has 2 entries per
+    # coupling (one for the "previous" parent edge, one for the "next" parent
+    # edge at that junction); children_MOI has 1 entry per coupling.
+    parent_MOI = torch.zeros(len(rigid_body_coupling_index) * 2, 3)
+    parent_rod_axis_angle = torch.zeros(1, 3)
+    parent_rod_orientation = pytorch3d.transforms.rotation_conversions.axis_angle_to_quaternion(
+        parent_rod_axis_angle).unsqueeze(dim=0).repeat(1, p_n_vert - 1, 1)
+
+    children_mass            = torch.zeros(len(cs_n_vert), max(cs_n_vert))
+    children_MOI             = torch.zeros(len(rigid_body_coupling_index), 3)
+    children_nominal_length  = torch.zeros(len(cs_n_vert), max(cs_n_vert) - 1)
+    children_nominal_radius  = torch.zeros(len(cs_n_vert), max(cs_n_vert) - 1)
+
+    child_rod_axis_angle = torch.zeros(1, 3)
+    children_rod_orientation = pytorch3d.transforms.rotation_conversions.axis_angle_to_quaternion(
+        child_rod_axis_angle).unsqueeze(dim=0).repeat(1, len(rigid_body_coupling_index), 1)
+
+    # Per-child loop: each child attaches to the parent (no nested children)
+    for i in range(len(rigid_body_coupling_index)):
+        c_n_vert = cs_n_vert[i]
+
+        # Parent MOI at this coupling — uses the parent's edge length/radius
+        # at the coupling index (matching the non-bdlo5 path of DEFT_initialization).
+        moi_idx = rigid_body_coupling_index[i] - 1
+        moi_length = parent_nominal_length[moi_idx]
+        moi_radius = parent_nominal_radius[moi_idx]
+        I_x_parent = 1 / 12 * moi_length ** 2 + 1 / 4 * moi_radius ** 2
+        I_y_parent = I_x_parent
+        I_z_parent = 1 / 2 * parent_nominal_radius[moi_idx] ** 2
+        parent_MOI[2 * i, 0] = I_x_parent * parent_moment_scale
+        parent_MOI[2 * i, 1] = I_y_parent * parent_moment_scale
+        parent_MOI[2 * i, 2] = I_z_parent * parent_moment_scale
+
+        # Second MOI entry (the existing BDLO1–5 path also uses
+        # parent_nominal_length/radius at rigid_body_coupling_index[0]; we
+        # mirror that exactly so the layout matches).
+        I_x_parent2 = 1 / 12 * parent_nominal_length[rigid_body_coupling_index[0]] ** 2 \
+                      + 1 / 4 * parent_nominal_radius[rigid_body_coupling_index[0]] ** 2
+        I_y_parent2 = I_x_parent2
+        I_z_parent2 = 1 / 2 * parent_nominal_radius[rigid_body_coupling_index[0]] ** 2
+        parent_MOI[2 * i + 1, 0] = I_x_parent2 * parent_moment_scale
+        parent_MOI[2 * i + 1, 1] = I_y_parent2 * parent_moment_scale
+        parent_MOI[2 * i + 1, 2] = I_z_parent2 * parent_moment_scale
+
+        # Pull the assembled child rod (already has child[0] == parent[attach])
+        child_v = b_undeformed_vert[i + 1:i + 2, :c_n_vert]            # [1, c_n_vert, 3]
+
+        # Nominal length and radius for this child
+        child_nominal_length = torch.norm(
+            child_v[:, 1:c_n_vert] - child_v[:, :c_n_vert - 1], dim=-1)[0]
+        child_nominal_radius = child_nominal_length * moment_ratio
+
+        # Mass distribution for the child rod
+        child_mass = torch.zeros(c_n_vert)
+        child_mass[0:c_n_vert - 1] += child_nominal_length / 2.
+        child_mass[1:c_n_vert]     += child_nominal_length / 2.
+        child_mass = child_mass * children_mass_scale[i]
+        children_mass[i, :c_n_vert] = child_mass
+
+        children_nominal_length[i, :c_n_vert - 1] = child_nominal_length
+        children_nominal_radius[i, :c_n_vert - 1] = child_nominal_radius
+
+        # Child MOI
+        I_y_child = 1 / 12 * child_nominal_length[0] ** 2 + 1 / 4 * child_nominal_radius[0] ** 2
+        I_x_child = I_y_parent
+        I_z_child = 1 / 2 * child_nominal_radius[0] ** 2
+        children_MOI[i, 0] = I_x_child * children_moment_scale[i]
+        children_MOI[i, 1] = I_y_child * children_moment_scale[i]
+        children_MOI[i, 2] = I_z_child * children_moment_scale[i]
+
+    # Stack mass into [n_branch, p_n_vert]
+    b_DLO_mass = torch.zeros(n_branch, p_n_vert)
+    b_DLO_mass[0] = p_DLO_mass
+    b_DLO_mass[1:, :children_mass.size(1)] = children_mass
+
+    # Stack nominal length into [n_branch, p_n_vert - 1]
+    b_nominal_length = torch.zeros(n_branch, p_n_vert - 1)
+    b_nominal_length[0] = parent_nominal_length
+    b_nominal_length[1:, :children_nominal_length.size(1)] = children_nominal_length
+
+    return b_DLO_mass, parent_MOI, children_MOI, parent_rod_orientation, children_rod_orientation, b_nominal_length
+
+
+def construct_b_DLOs_BDLO6(batch, b_undeformed_vert):
+    """
+    Replicate the BDLO6 undeformed pose (`[4, 12, 3]` padded layout) across the
+    batch dimension. Mirrors the role of `construct_b_DLOs` for BDLO1–5 but
+    skips the per-child prepend logic, since `b_undeformed_vert` already has
+    `child[0] == parent[attach]` from `_bdlo6_split_and_pad`.
+
+    Returns `(b_DLOs_vertices, previous_b_DLOs_vertices)` where both have
+    shape `[batch, 4, 12, 3]` and contain identical content (the undeformed
+    pose at "current" and "previous" timesteps).
+    """
+    assert b_undeformed_vert.shape == (_BDLO6_N_BRANCH, _BDLO6_N_PARENT, 3), \
+        f"unexpected b_undeformed_vert shape {tuple(b_undeformed_vert.shape)}"
+    b_DLOs_vertices = b_undeformed_vert.unsqueeze(0).repeat(batch, 1, 1, 1).contiguous()
+    previous_b_DLOs_vertices = b_DLOs_vertices.clone()
+    return b_DLOs_vertices, previous_b_DLOs_vertices
+
+
+class Eval_DEFTData_BDLO6(Dataset):
+    """
+    PyTorch Dataset for BDLO6 *evaluation* data. Mirrors the interface of
+    `Eval_DEFTData`: each item is one full eval trajectory of length
+    `eval_time_horizon`, shape `[eval_time_horizon, 4, 12, 3]`.
+    """
+
+    def __init__(self, total_time, eval_time_horizon, device,
+                 root_dir="../dataset/BDLO6/eval/"):
+        super().__init__()
+        self.device = device
+        file_list = sorted(glob.glob(root_dir + "*"))
+
+        self.BDLOs_previous_vertices = []
+        self.BDLOs_vertices          = []
+        self.BDLOs_target_vertices   = []
+
+        for rope_data in tqdm(file_list, desc="Loading BDLO6 eval"):
+            BDLO_vert = _load_bdlo6_trajectory_pkl(rope_data, total_time)
+            if BDLO_vert[0:eval_time_horizon].size() != (eval_time_horizon, _BDLO6_N_BRANCH, _BDLO6_N_PARENT, 3):
+                print("False Size")
+            self.BDLOs_previous_vertices.append(BDLO_vert[0:0 + eval_time_horizon].numpy())
+            self.BDLOs_vertices.append         (BDLO_vert[1:1 + eval_time_horizon].numpy())
+            self.BDLOs_target_vertices.append  (BDLO_vert[2:2 + eval_time_horizon].numpy())
+
+        self.previous_vertices = np.array(self.BDLOs_previous_vertices)
+        self.vertices          = np.array(self.BDLOs_vertices)
+        self.target_vertices   = np.array(self.BDLOs_target_vertices)
+
+    def __len__(self):
+        return len(self.vertices)
+
+    def __getitem__(self, index):
+        previous_vertices = torch.tensor(self.previous_vertices[index]).to(self.device)
+        vertices          = torch.tensor(self.vertices[index]).to(self.device)
+        target_vertices   = torch.tensor(self.target_vertices[index]).to(self.device)
         return (previous_vertices.clone().detach(),
                 vertices.clone().detach(),
                 target_vertices.clone().detach())

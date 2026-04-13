@@ -8,7 +8,7 @@ from .DEFT_func import DEFT_func
 # - rotation_matrix: Helper for creating rotation matrices from angles
 # - computeW, computeLengths, computeEdges: Utility functions for BDLO geometry
 # - visualize_tensors_3d_in_same_plot_no_zeros: For debugging/visualizing results
-from ..utils.util import rotation_matrix, computeW, computeLengths, computeEdges, visualize_tensors_3d_in_same_plot_no_zeros
+from ..utils.util import rotation_matrix, computeW, computeLengths, computeEdges, visualize_tensors_3d_in_same_plot_no_zeros, visualize_bdlo6_3d
 
 # Import constraints solver(s)
 from ..solvers.constraints_solver import constraints_enforcement
@@ -65,6 +65,8 @@ class DEFT_sim(nn.Module):
         bdlo5=False,
         use_child2_orientation=True,
         skip_child2_coupling=False,
+        bdlo6=False,
+        bend_stiffness_child3=None,
         hidden_features=256
     ):
         super().__init__()
@@ -130,6 +132,7 @@ class DEFT_sim(nn.Module):
         self.bdlo5 = bdlo5
         self.use_child2_orientation = use_child2_orientation
         self.skip_child2_coupling = skip_child2_coupling
+        self.bdlo6 = bdlo6
 
         # For parallelization across a batch and multiple branches:
         # We'll figure out child vs parent branches (indices) in a vectorized way
@@ -158,6 +161,10 @@ class DEFT_sim(nn.Module):
         self.selected_parent_index = torch.tensor(selected_parent_index)
         self.selected_child1_index = torch.tensor(selected_child1_index)
         self.selected_child2_index = torch.tensor(selected_child2_index)
+        if bdlo6:
+            # BDLO6 has a 4th branch (child3 at slot 3 of every n_branch group).
+            selected_child3_index = list(range(3, batch * n_branch, n_branch))
+            self.selected_child3_index = torch.tensor(selected_child3_index)
 
         # Expand clamped vertex selection for the parent across the batch
         batch_indices = self.selected_parent_index.unsqueeze(1).expand(-1, parent_clamped_selection.size(0))
@@ -233,7 +240,8 @@ class DEFT_sim(nn.Module):
             bend_stiffness_child1,
             bend_stiffness_child2,
             twist_stiffness,
-            device=device
+            device=device,
+            bend_stiffness_child3=bend_stiffness_child3,
         )
 
         # Apply the masks so that unused edges are 0
@@ -292,6 +300,29 @@ class DEFT_sim(nn.Module):
             momentum_scale1 = -rod_MOI2 @ torch.linalg.pinv(rod_MOI1 + rod_MOI2)
             momentum_scale2 = rod_MOI1 @ torch.linalg.pinv(rod_MOI1 + rod_MOI2)
             self.momentum_scale_next = torch.cat((momentum_scale1, momentum_scale2), dim=1).view(-1, 3, 3)
+
+        if bdlo6:
+            # BDLO6 needs per-junction [batch, 2, 3, 3] momentum scales because
+            # the orientation constraint goes through Rotation_Constraint_Single_Junction
+            # (one call per child junction). The non-bdlo5 build above produces
+            # a flat [batch*n_children*2, 3, 3] layout which doesn't match the
+            # single-junction signature, so we re-derive per-child scales here.
+            self.bdlo6_momentum_scale_prev_list = []
+            self.bdlo6_momentum_scale_next_list = []
+            n_children_bdlo6 = len(rigid_body_coupling_index)   # 3
+            for c_i in range(n_children_bdlo6):
+                # "Previous" parent edge at this junction (parent_MOI_index1[c_i])
+                rm1 = self.parent_MOI_matrix[parent_MOI_index1[c_i:c_i+1]].repeat(batch, 1, 1)
+                rm2 = self.children_MOI_matrix[c_i:c_i+1].repeat(batch, 1, 1)
+                ms1 = -rm2 @ torch.linalg.pinv(rm1 + rm2)
+                ms2 =  rm1 @ torch.linalg.pinv(rm1 + rm2)
+                self.bdlo6_momentum_scale_prev_list.append(torch.stack((ms1, ms2), dim=1))
+
+                rm1 = self.parent_MOI_matrix[parent_MOI_index2[c_i:c_i+1]].repeat(batch, 1, 1)
+                rm2 = self.children_MOI_matrix[c_i:c_i+1].repeat(batch, 1, 1)
+                ms1 = -rm2 @ torch.linalg.pinv(rm1 + rm2)
+                ms2 =  rm1 @ torch.linalg.pinv(rm1 + rm2)
+                self.bdlo6_momentum_scale_next_list.append(torch.stack((ms1, ms2), dim=1))
 
         # inext_scale is used for inextensibility enforcement: a high penalty for edges that must remain fixed length
         inext_scale = clamped_index * 1e20
@@ -473,7 +504,9 @@ class DEFT_sim(nn.Module):
             selected_child2_index,
             selected_parent_index,
             selected_children_index,
-            bdlo5=bdlo5
+            bdlo5=bdlo5,
+            bdlo6=bdlo6,
+            selected_child3_index=(self.selected_child3_index if bdlo6 else None),
         )
 
 
@@ -1164,6 +1197,9 @@ class DEFT_sim(nn.Module):
                     momentum_scale_next_numpy = self.momentum_scale_next.view(-1, 3, 3).detach().cpu().numpy().astype(np.float64).copy()
                     child2_momentum_scale_previous_numpy = self.child2_momentum_scale_previous.view(-1, 3, 3).detach().cpu().numpy().astype(np.float64).copy()
                     child2_momentum_scale_next_numpy = self.child2_momentum_scale_next.view(-1, 3, 3).detach().cpu().numpy().astype(np.float64).copy()
+                    # c2↔c1 coupling mass scale (mass-blended c2 attachment),
+                    # shape [batch, 2, 3, 3] — passed straight to the numba kernel.
+                    child2_coupling_mass_scale_numpy = self.child2_coupling_mass_scale.detach().cpu().numpy().astype(np.float64).copy()
 
                 # Repeatedly enforce rotation and inextensibility constraints
                 for constraint_loop_i in range(constraint_loop):
@@ -1191,17 +1227,27 @@ class DEFT_sim(nn.Module):
                             prev_child1 = prev_cv_t[:, 0]
                             prev_child2 = prev_cv_t[:, 1]
 
-                            # Child1 vs parent
+                            # Child1 vs parent — Edge1
+                            # NB: per-call prev_* refresh discipline (mirrors the torch
+                            # path) — without it the second call reads the same anchor
+                            # as the first call and the orientation accumulator runs
+                            # away (see BDLO5 fix history).
                             pv_t, child1_verts, pro_t, cro_t[:, 0] = \
                                 self.constraints_enforcement.Rotation_Constraint_Single_Junction(
                                     pv_t, child1_verts, pro_t, cro_t[:, 0],
                                     prev_pv1_t, prev_child1,
                                     c1_idx - 1, self.momentum_scale_previous)
+                            prev_pv1_t = pv_t.clone()
+                            prev_child1 = child1_verts.clone()
+
+                            # Child1 vs parent — Edge2
                             pv_t, child1_verts, pro_t, cro_t[:, 0] = \
                                 self.constraints_enforcement.Rotation_Constraint_Single_Junction(
                                     pv_t, child1_verts, pro_t, cro_t[:, 0],
                                     prev_pv2_t, prev_child1,
                                     c1_idx, self.momentum_scale_next)
+                            prev_pv2_t = pv_t.clone()
+                            prev_child1 = child1_verts.clone()
 
                             # Child2 vs child1
                             if self.use_child2_orientation:
@@ -1211,23 +1257,35 @@ class DEFT_sim(nn.Module):
                                         c1_as_parent, child2_verts, pro_t, cro_t[:, 1],
                                         prev_child1, prev_child2,
                                         c2_local_idx - 1, self.child2_momentum_scale_previous)
+                                prev_child1 = c1_as_parent.clone()
+                                prev_child2 = child2_verts.clone()
+
                                 c1_as_parent, child2_verts, pro_t, cro_t[:, 1] = \
                                     self.constraints_enforcement.Rotation_Constraint_Single_Junction(
                                         c1_as_parent, child2_verts, pro_t, cro_t[:, 1],
                                         prev_child1, prev_child2,
                                         c2_local_idx, self.child2_momentum_scale_next)
+                                prev_child1 = c1_as_parent.clone()
+                                prev_child2 = child2_verts.clone()
 
-                            # Convert back to numpy
-                            cv_t[:, 0] = c1_as_parent
-                            cv_t[:, 1] = child2_verts
+                                cv_t[:, 0] = c1_as_parent
+                                cv_t[:, 1] = child2_verts
+                            else:
+                                cv_t[:, 0] = child1_verts
                             parent_vertices = pv_t.numpy().astype(np.float64)
                             children_vertices = cv_t.numpy().astype(np.float64)
                             parent_rod_orientation = pro_t.numpy().astype(np.float64)
                             children_rod_orientation = cro_t.numpy().astype(np.float64)
 
-                            previous_parent_vertices_iteration_edge1 = parent_vertices.copy()
-                            previous_parent_vertices_iteration_edge2 = parent_vertices.copy()
-                            previous_children_vertices_iteration_edge = children_vertices.copy()
+                            # Persist refreshed prev anchors so the NEXT constraint-loop
+                            # iter sees the post-enforcement state, not the start-of-iter
+                            # snapshot.
+                            previous_parent_vertices_iteration_edge1 = prev_pv1_t.numpy().astype(np.float64)
+                            previous_parent_vertices_iteration_edge2 = prev_pv2_t.numpy().astype(np.float64)
+                            previous_children_vertices_iteration_edge = previous_children_vertices_iteration_edge.copy()
+                            previous_children_vertices_iteration_edge[:, 0] = prev_child1.numpy().astype(np.float64)
+                            if self.use_child2_orientation:
+                                previous_children_vertices_iteration_edge[:, 1] = prev_child2.numpy().astype(np.float64)
                         else:
                             # Edge1
                             parent_vertices, parent_rod_orientation, children_vertices, children_rod_orientation = \
@@ -1277,7 +1335,8 @@ class DEFT_sim(nn.Module):
                             coupling_mass_scale_numpy,
                             self.selected_parent_index,
                             self.selected_children_index,
-                            bdlo5=int(self.bdlo5)
+                            bdlo5=int(self.bdlo5),
+                            child2_coupling_mass_scale=(child2_coupling_mass_scale_numpy if self.bdlo5 else None),
                         )
                     else:
                         # Naive snap: pin each child's root to the parent junction
@@ -1388,6 +1447,69 @@ class DEFT_sim(nn.Module):
                             previous_children_vertices_iteration_edge[:, 0] = prev_child1_verts
                             if self.use_child2_orientation:
                                 previous_children_vertices_iteration_edge[:, 1] = prev_child2_verts
+                        elif self.bdlo6:
+                            # BDLO6: 3 children all attached to parent (c2/c3 share parent[7]).
+                            # We use Rotation_Constraint_Single_Junction sequentially for each
+                            # child instead of the legacy batched function — that one fancy-
+                            # indexes parent_rod_orientation by `coupling_index = [2, 7, 7]`,
+                            # which silently drops one of c2's/c3's parent updates (same
+                            # duplicate-write issue we hit on the attachment side).
+                            #
+                            # Per-call prev_* refresh discipline is required for correctness
+                            # (see the BDLO5 fix history above).
+                            n_children_b6 = len(self.rigid_body_coupling_index)
+                            prev_children_local = [
+                                previous_children_vertices_iteration_edge[:, c_i].clone()
+                                for c_i in range(n_children_b6)
+                            ]
+                            for c_i in range(n_children_b6):
+                                p_idx = self.rigid_body_coupling_index[c_i]
+                                child_verts_local = children_vertices[:, c_i]
+
+                                # Edge1: parent edge ending at p_idx (idx = p_idx - 1)
+                                parent_vertices, child_verts_local, parent_rod_orientation, _new_c_orient = \
+                                    self.constraints_enforcement.Rotation_Constraint_Single_Junction(
+                                        parent_vertices, child_verts_local,
+                                        parent_rod_orientation, children_rod_orientation[:, c_i],
+                                        previous_parent_vertices_iteration_edge1,
+                                        prev_children_local[c_i],
+                                        p_idx - 1,
+                                        self.bdlo6_momentum_scale_prev_list[c_i])
+                                children_rod_orientation = torch.cat([
+                                    children_rod_orientation[:, :c_i],
+                                    _new_c_orient.unsqueeze(1),
+                                    children_rod_orientation[:, c_i + 1:],
+                                ], dim=1)
+                                previous_parent_vertices_iteration_edge1 = parent_vertices.clone()
+                                prev_children_local[c_i] = child_verts_local.clone()
+
+                                # Edge2: parent edge starting at p_idx (idx = p_idx)
+                                parent_vertices, child_verts_local, parent_rod_orientation, _new_c_orient = \
+                                    self.constraints_enforcement.Rotation_Constraint_Single_Junction(
+                                        parent_vertices, child_verts_local,
+                                        parent_rod_orientation, children_rod_orientation[:, c_i],
+                                        previous_parent_vertices_iteration_edge2,
+                                        prev_children_local[c_i],
+                                        p_idx,
+                                        self.bdlo6_momentum_scale_next_list[c_i])
+                                children_rod_orientation = torch.cat([
+                                    children_rod_orientation[:, :c_i],
+                                    _new_c_orient.unsqueeze(1),
+                                    children_rod_orientation[:, c_i + 1:],
+                                ], dim=1)
+                                previous_parent_vertices_iteration_edge2 = parent_vertices.clone()
+                                prev_children_local[c_i] = child_verts_local.clone()
+
+                                # Stitch the updated child rod back into children_vertices
+                                children_vertices = torch.cat([
+                                    children_vertices[:, :c_i],
+                                    child_verts_local.unsqueeze(1),
+                                    children_vertices[:, c_i + 1:],
+                                ], dim=1)
+
+                            # Persist refreshed children anchors for the next iter / step.
+                            previous_children_vertices_iteration_edge = torch.stack(
+                                prev_children_local, dim=1)
                         else:
                             # Edge1
                             parent_vertices, parent_rod_orientation, children_vertices, children_rod_orientation = \
@@ -1438,7 +1560,8 @@ class DEFT_sim(nn.Module):
                             self.selected_children_index,
                             bdlo5=self.bdlo5,
                             child2_coupling_mass_scale=self.child2_coupling_mass_scale if self.bdlo5 else None,
-                            skip_child2_coupling=self.skip_child2_coupling
+                            skip_child2_coupling=self.skip_child2_coupling,
+                            bdlo6=self.bdlo6,
                         )
                     else:
                         # Naive snap: pin each child's root to the parent junction
@@ -1491,6 +1614,71 @@ class DEFT_sim(nn.Module):
             if vis:
                 vis_batch = self.batch  # how many samples we visualize
                 for i_eval_batch in range(vis_batch):
+                    if self.bdlo6:
+                        # BDLO6 has 4 branches; the legacy visualizer is hardcoded for
+                        # 3, so we go through visualize_bdlo6_3d which takes a list of
+                        # children predictions and a list of children GT.
+                        parent_gt_traj = target_b_DLOs_vertices_traj[i_eval_batch][:, 0]
+                        c1_gt_traj     = target_b_DLOs_vertices_traj[i_eval_batch][:, 1]
+                        c2_gt_traj     = target_b_DLOs_vertices_traj[i_eval_batch][:, 2]
+                        c3_gt_traj     = target_b_DLOs_vertices_traj[i_eval_batch][:, 3]
+
+                        # Stored c[0] already equals parent[attach] from
+                        # _bdlo6_split_and_pad, so no prepend needed here.
+                        children_gt_list = [c1_gt_traj[ith], c2_gt_traj[ith], c3_gt_traj[ith]]
+
+                        parent_pred_b = b_DLOs_vertices[self.selected_parent_index][i_eval_batch]
+                        c1_pred_b = b_DLOs_vertices[self.selected_child1_index][i_eval_batch]
+                        c2_pred_b = b_DLOs_vertices[self.selected_child2_index][i_eval_batch]
+                        c3_pred_b = b_DLOs_vertices[self.selected_child3_index][i_eval_batch]
+                        children_pred_list = [c1_pred_b, c2_pred_b, c3_pred_b]
+
+                        # Compute consistent xlim/ylim/zlim ONCE per sample from the
+                        # full GT trajectory. Cached on self so frames after ith==0
+                        # reuse the same bbox → axes don't autoscale per frame and
+                        # the rod doesn't visually jump/squash. Equal-scale via
+                        # set_box_aspect((1,1,1)) is applied inside the visualizer.
+                        if not hasattr(self, '_bdlo6_vis_bbox_cache'):
+                            self._bdlo6_vis_bbox_cache = {}
+                        if i_eval_batch not in self._bdlo6_vis_bbox_cache:
+                            gt_full = target_b_DLOs_vertices_traj[i_eval_batch]   # [T, 4, n_vert, 3]
+                            mask = gt_full.abs().sum(-1) > 0                       # zero-pad slots
+                            pts = gt_full[mask]                                    # [N_active, 3]
+                            mins = pts.min(0).values
+                            maxs = pts.max(0).values
+                            margin = 0.05
+                            mins = mins - margin
+                            maxs = maxs + margin
+                            # Center each axis on a common cube edge so set_box_aspect
+                            # produces visually equal units.
+                            max_range = float((maxs - mins).max().item())
+                            mids = (mins + maxs) / 2
+                            half = max_range / 2
+                            xlim = (float(mids[0] - half), float(mids[0] + half))
+                            ylim = (float(mids[1] - half), float(mids[1] + half))
+                            zlim = (float(mids[2] - half), float(mids[2] + half))
+                            self._bdlo6_vis_bbox_cache[i_eval_batch] = (xlim, ylim, zlim)
+                        xlim, ylim, zlim = self._bdlo6_vis_bbox_cache[i_eval_batch]
+
+                        # parent_fix_point is shaped [batch, time, n_clamped, 3];
+                        # slice down to JUST this sample's clamps so we don't draw
+                        # the other 20 samples' clamp markers on top of this view.
+                        if self.clamp_parent and parent_fix_point is not None:
+                            sample_fix = parent_fix_point[i_eval_batch, ith].reshape(-1, 3)
+                        else:
+                            sample_fix = None
+
+                        visualize_bdlo6_3d(
+                            self.parent_clamped_selection,
+                            parent_pred_b, children_pred_list,
+                            parent_gt_traj[ith], children_gt_list,
+                            ith, i_eval_batch, vis_type,
+                            clamp_parent=self.clamp_parent,
+                            parent_fix_point=sample_fix,
+                            xlim=xlim, ylim=ylim, zlim=zlim,
+                        )
+                        continue   # skip the BDLO1–5 vis branch below
+
                     parent_vertices_traj_vis = target_b_DLOs_vertices_traj[i_eval_batch][:, 0]
                     child1_vertices_traj_vis = target_b_DLOs_vertices_traj[i_eval_batch][:, 1]
                     child2_vertices_traj_vis = target_b_DLOs_vertices_traj[i_eval_batch][:, 2]
@@ -1827,6 +2015,9 @@ class DEFT_sim(nn.Module):
                     momentum_scale_next_numpy = self.momentum_scale_next.view(-1, 3, 3).detach().cpu().numpy().astype(np.float64).copy()
                     child2_momentum_scale_previous_numpy = self.child2_momentum_scale_previous.view(-1, 3, 3).detach().cpu().numpy().astype(np.float64).copy()
                     child2_momentum_scale_next_numpy = self.child2_momentum_scale_next.view(-1, 3, 3).detach().cpu().numpy().astype(np.float64).copy()
+                    # c2↔c1 coupling mass scale (mass-blended c2 attachment),
+                    # shape [batch, 2, 3, 3] — passed straight to the numba kernel.
+                    child2_coupling_mass_scale_numpy = self.child2_coupling_mass_scale.detach().cpu().numpy().astype(np.float64).copy()
 
                 # Repeatedly enforce rotation and inextensibility constraints
                 for constraint_loop_i in range(constraint_loop):
@@ -1854,17 +2045,27 @@ class DEFT_sim(nn.Module):
                             prev_child1 = prev_cv_t[:, 0]
                             prev_child2 = prev_cv_t[:, 1]
 
-                            # Child1 vs parent
+                            # Child1 vs parent — Edge1
+                            # NB: per-call prev_* refresh discipline (mirrors the torch
+                            # path) — without it the second call reads the same anchor
+                            # as the first call and the orientation accumulator runs
+                            # away (see BDLO5 fix history).
                             pv_t, child1_verts, pro_t, cro_t[:, 0] = \
                                 self.constraints_enforcement.Rotation_Constraint_Single_Junction(
                                     pv_t, child1_verts, pro_t, cro_t[:, 0],
                                     prev_pv1_t, prev_child1,
                                     c1_idx - 1, self.momentum_scale_previous)
+                            prev_pv1_t = pv_t.clone()
+                            prev_child1 = child1_verts.clone()
+
+                            # Child1 vs parent — Edge2
                             pv_t, child1_verts, pro_t, cro_t[:, 0] = \
                                 self.constraints_enforcement.Rotation_Constraint_Single_Junction(
                                     pv_t, child1_verts, pro_t, cro_t[:, 0],
                                     prev_pv2_t, prev_child1,
                                     c1_idx, self.momentum_scale_next)
+                            prev_pv2_t = pv_t.clone()
+                            prev_child1 = child1_verts.clone()
 
                             # Child2 vs child1
                             if self.use_child2_orientation:
@@ -1874,23 +2075,35 @@ class DEFT_sim(nn.Module):
                                         c1_as_parent, child2_verts, pro_t, cro_t[:, 1],
                                         prev_child1, prev_child2,
                                         c2_local_idx - 1, self.child2_momentum_scale_previous)
+                                prev_child1 = c1_as_parent.clone()
+                                prev_child2 = child2_verts.clone()
+
                                 c1_as_parent, child2_verts, pro_t, cro_t[:, 1] = \
                                     self.constraints_enforcement.Rotation_Constraint_Single_Junction(
                                         c1_as_parent, child2_verts, pro_t, cro_t[:, 1],
                                         prev_child1, prev_child2,
                                         c2_local_idx, self.child2_momentum_scale_next)
+                                prev_child1 = c1_as_parent.clone()
+                                prev_child2 = child2_verts.clone()
 
-                            # Convert back to numpy
-                            cv_t[:, 0] = c1_as_parent
-                            cv_t[:, 1] = child2_verts
+                                cv_t[:, 0] = c1_as_parent
+                                cv_t[:, 1] = child2_verts
+                            else:
+                                cv_t[:, 0] = child1_verts
                             parent_vertices = pv_t.numpy().astype(np.float64)
                             children_vertices = cv_t.numpy().astype(np.float64)
                             parent_rod_orientation = pro_t.numpy().astype(np.float64)
                             children_rod_orientation = cro_t.numpy().astype(np.float64)
 
-                            previous_parent_vertices_iteration_edge1 = parent_vertices.copy()
-                            previous_parent_vertices_iteration_edge2 = parent_vertices.copy()
-                            previous_children_vertices_iteration_edge = children_vertices.copy()
+                            # Persist refreshed prev anchors so the NEXT constraint-loop
+                            # iter sees the post-enforcement state, not the start-of-iter
+                            # snapshot.
+                            previous_parent_vertices_iteration_edge1 = prev_pv1_t.numpy().astype(np.float64)
+                            previous_parent_vertices_iteration_edge2 = prev_pv2_t.numpy().astype(np.float64)
+                            previous_children_vertices_iteration_edge = previous_children_vertices_iteration_edge.copy()
+                            previous_children_vertices_iteration_edge[:, 0] = prev_child1.numpy().astype(np.float64)
+                            if self.use_child2_orientation:
+                                previous_children_vertices_iteration_edge[:, 1] = prev_child2.numpy().astype(np.float64)
                         else:
                             # Edge1
                             parent_vertices, parent_rod_orientation, children_vertices, children_rod_orientation = \
@@ -1940,7 +2153,8 @@ class DEFT_sim(nn.Module):
                             coupling_mass_scale_numpy,
                             self.selected_parent_index,
                             self.selected_children_index,
-                            bdlo5=int(self.bdlo5)
+                            bdlo5=int(self.bdlo5),
+                            child2_coupling_mass_scale=(child2_coupling_mass_scale_numpy if self.bdlo5 else None),
                         )
                     else:
                         # Naive snap: pin each child's root to the parent junction
@@ -2051,6 +2265,69 @@ class DEFT_sim(nn.Module):
                             previous_children_vertices_iteration_edge[:, 0] = prev_child1_verts
                             if self.use_child2_orientation:
                                 previous_children_vertices_iteration_edge[:, 1] = prev_child2_verts
+                        elif self.bdlo6:
+                            # BDLO6: 3 children all attached to parent (c2/c3 share parent[7]).
+                            # We use Rotation_Constraint_Single_Junction sequentially for each
+                            # child instead of the legacy batched function — that one fancy-
+                            # indexes parent_rod_orientation by `coupling_index = [2, 7, 7]`,
+                            # which silently drops one of c2's/c3's parent updates (same
+                            # duplicate-write issue we hit on the attachment side).
+                            #
+                            # Per-call prev_* refresh discipline is required for correctness
+                            # (see the BDLO5 fix history above).
+                            n_children_b6 = len(self.rigid_body_coupling_index)
+                            prev_children_local = [
+                                previous_children_vertices_iteration_edge[:, c_i].clone()
+                                for c_i in range(n_children_b6)
+                            ]
+                            for c_i in range(n_children_b6):
+                                p_idx = self.rigid_body_coupling_index[c_i]
+                                child_verts_local = children_vertices[:, c_i]
+
+                                # Edge1: parent edge ending at p_idx (idx = p_idx - 1)
+                                parent_vertices, child_verts_local, parent_rod_orientation, _new_c_orient = \
+                                    self.constraints_enforcement.Rotation_Constraint_Single_Junction(
+                                        parent_vertices, child_verts_local,
+                                        parent_rod_orientation, children_rod_orientation[:, c_i],
+                                        previous_parent_vertices_iteration_edge1,
+                                        prev_children_local[c_i],
+                                        p_idx - 1,
+                                        self.bdlo6_momentum_scale_prev_list[c_i])
+                                children_rod_orientation = torch.cat([
+                                    children_rod_orientation[:, :c_i],
+                                    _new_c_orient.unsqueeze(1),
+                                    children_rod_orientation[:, c_i + 1:],
+                                ], dim=1)
+                                previous_parent_vertices_iteration_edge1 = parent_vertices.clone()
+                                prev_children_local[c_i] = child_verts_local.clone()
+
+                                # Edge2: parent edge starting at p_idx (idx = p_idx)
+                                parent_vertices, child_verts_local, parent_rod_orientation, _new_c_orient = \
+                                    self.constraints_enforcement.Rotation_Constraint_Single_Junction(
+                                        parent_vertices, child_verts_local,
+                                        parent_rod_orientation, children_rod_orientation[:, c_i],
+                                        previous_parent_vertices_iteration_edge2,
+                                        prev_children_local[c_i],
+                                        p_idx,
+                                        self.bdlo6_momentum_scale_next_list[c_i])
+                                children_rod_orientation = torch.cat([
+                                    children_rod_orientation[:, :c_i],
+                                    _new_c_orient.unsqueeze(1),
+                                    children_rod_orientation[:, c_i + 1:],
+                                ], dim=1)
+                                previous_parent_vertices_iteration_edge2 = parent_vertices.clone()
+                                prev_children_local[c_i] = child_verts_local.clone()
+
+                                # Stitch the updated child rod back into children_vertices
+                                children_vertices = torch.cat([
+                                    children_vertices[:, :c_i],
+                                    child_verts_local.unsqueeze(1),
+                                    children_vertices[:, c_i + 1:],
+                                ], dim=1)
+
+                            # Persist refreshed children anchors for the next iter / step.
+                            previous_children_vertices_iteration_edge = torch.stack(
+                                prev_children_local, dim=1)
                         else:
                             # Edge1
                             parent_vertices, parent_rod_orientation, children_vertices, children_rod_orientation = \
@@ -2101,7 +2378,8 @@ class DEFT_sim(nn.Module):
                             self.selected_children_index,
                             bdlo5=self.bdlo5,
                             child2_coupling_mass_scale=self.child2_coupling_mass_scale if self.bdlo5 else None,
-                            skip_child2_coupling=self.skip_child2_coupling
+                            skip_child2_coupling=self.skip_child2_coupling,
+                            bdlo6=self.bdlo6,
                         )
                     else:
                         # Naive snap: pin each child's root to the parent junction

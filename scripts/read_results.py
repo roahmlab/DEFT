@@ -4,10 +4,12 @@ import numpy as np
 
 """example of reading pkl files"""
 
-clamp_type = "middle"
+clamp_type = "ends"
+# model = "TreeLSTM"
+# model = "GCN"
 model = "DEFT"
 training_case = 1
-BDLO_type = 3
+BDLO_type = 5
 eval_loss_1 = np.array(pd.read_pickle(r"../training_record/eval_%s_loss_%s_%s_%s.pkl" % (clamp_type, model, training_case, BDLO_type)))
 eval_step_1 = np.array(pd.read_pickle(r"../training_record/eval_%s_epoches_%s_%s_%s.pkl" % (clamp_type,  model, training_case, BDLO_type)))
 print(np.sqrt(eval_loss_1))
