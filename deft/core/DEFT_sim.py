@@ -351,14 +351,16 @@ class DEFT_sim(nn.Module):
             self.child2_coupling_mass_scale = torch.cat((ms1_c2.unsqueeze(dim=1), -ms2_c2.unsqueeze(dim=1)), dim=1)
 
             # Child2 → child1 momentum scale for orientation constraints
+            # Use a very small MOI for child2 so that child2 follows child1's
+            # orientation (child1 absorbs ~0 correction, child2 absorbs ~all).
             c2_rod_MOI1 = self.parent_MOI_matrix[parent_MOI_index1[1:2]].repeat(batch, 1, 1)
-            c2_rod_MOI2 = self.children_MOI_matrix[1:2].repeat(batch, 1, 1)
+            c2_rod_MOI2 = self.children_MOI_matrix[1:2].repeat(batch, 1, 1) * 1e-6
             c2_ms1 = -c2_rod_MOI2 @ torch.linalg.pinv(c2_rod_MOI1 + c2_rod_MOI2)
             c2_ms2 = c2_rod_MOI1 @ torch.linalg.pinv(c2_rod_MOI1 + c2_rod_MOI2)
             self.child2_momentum_scale_previous = torch.stack((c2_ms1, c2_ms2), dim=1)
 
             c2_rod_MOI1 = self.parent_MOI_matrix[parent_MOI_index2[1:2]].repeat(batch, 1, 1)
-            c2_rod_MOI2 = self.children_MOI_matrix[1:2].repeat(batch, 1, 1)
+            c2_rod_MOI2 = self.children_MOI_matrix[1:2].repeat(batch, 1, 1) * 1e-6
             c2_ms1 = -c2_rod_MOI2 @ torch.linalg.pinv(c2_rod_MOI1 + c2_rod_MOI2)
             c2_ms2 = c2_rod_MOI1 @ torch.linalg.pinv(c2_rod_MOI1 + c2_rod_MOI2)
             self.child2_momentum_scale_next = torch.stack((c2_ms1, c2_ms2), dim=1)
@@ -993,6 +995,26 @@ class DEFT_sim(nn.Module):
             inference_1_batch
         )
 
+        # Pre-compute GT-initial-frame out-of-plane ratios used by the c1/c2
+        # coplanar corrections during the constraint loop.
+        if self.bdlo5:
+            _init_verts = b_DLOs_vertices_traj[:, 0].reshape(-1, self.n_vert, 3)
+            _init_pv = _init_verts[self.selected_parent_index[0]]
+            _init_c1v = _init_verts[self.selected_children_index[0]]
+            _init_c2v = _init_verts[self.selected_children_index[1]]
+            _c1_idx = self.rigid_body_coupling_index[0]
+            _ep1 = _init_pv[_c1_idx] - _init_pv[_c1_idx - 1]
+            _ep2 = _init_pv[_c1_idx + 1] - _init_pv[_c1_idx]
+            _pn = torch.cross(_ep1, _ep2, dim=-1)
+            _pn = _pn / (_pn.norm() + 1e-10)
+            _ec1 = _init_c1v[1] - _init_c1v[0]
+            self._c1_oop_ratio = (_ec1 * _pn).sum().unsqueeze(0).unsqueeze(0) / _ec1.norm().unsqueeze(0).unsqueeze(0)
+            if self.use_child2_orientation:
+                _pn2 = torch.cross(_ep2, _ec1, dim=-1)
+                _pn2 = _pn2 / (_pn2.norm() + 1e-10)
+                _ec2 = _init_c2v[1] - _init_c2v[0]
+                self._c2_oop_ratio = (_ec2 * _pn2).sum().unsqueeze(0).unsqueeze(0) / _ec2.norm().unsqueeze(0).unsqueeze(0)
+
         # Main loop over timesteps
         for ith in range(time_horizon):
             # 1) Retrieve current/previous BDLO states
@@ -1249,24 +1271,83 @@ class DEFT_sim(nn.Module):
                             prev_pv2_t = pv_t.clone()
                             prev_child1 = child1_verts.clone()
 
+                            # Coplanarity for child1: correct the out-of-plane
+                            # component (axial rotation DOF) relative to the
+                            # parent bending plane. The target ratio comes from
+                            # the GT initial frame and decays linearly to 0
+                            # over 20 steps — the GT snapshot is a dynamic
+                            # pose, not a rest one, so we fade toward true
+                            # coplanar.
+                            e_p1 = pv_t[:, c1_idx] - pv_t[:, c1_idx - 1]
+                            e_p2 = pv_t[:, c1_idx + 1] - pv_t[:, c1_idx]
+                            pn = torch.cross(e_p1, e_p2, dim=-1)
+                            pn_norm = pn.norm(dim=-1, keepdim=True)
+                            if pn_norm.min() > 1e-6:
+                                pn = pn / pn_norm
+                                e_c = child1_verts[:, 1] - child1_verts[:, 0]
+                                e_c_len = e_c.norm(dim=-1, keepdim=True)
+                                _decay = max(0.0, 1.0 - ith / 20.0)
+                                current_oop = (e_c * pn).sum(-1, keepdim=True)
+                                target_oop = (_decay * self._c1_oop_ratio) * e_c_len
+                                e_c_corrected = e_c + (target_oop - current_oop) * pn
+                                e_c_corrected_norm = e_c_corrected.norm(dim=-1, keepdim=True)
+                                if e_c_corrected_norm.min() > 1e-6:
+                                    child1_verts = child1_verts.clone()
+                                    child1_verts[:, 1] = child1_verts[:, 0] + e_c_corrected / e_c_corrected_norm * e_c_len
+                                    prev_child1 = child1_verts.clone()
+
                             # Child2 vs child1
                             if self.use_child2_orientation:
                                 c1_as_parent = child1_verts.clone()
-                                c1_as_parent, child2_verts, pro_t, cro_t[:, 1] = \
+                                # c1 acts as the "parent" for c2's orientation enforcement.
+                                # Use c1's own rod-level quaternion as the alignment
+                                # reference (not the main parent's per-edge orientations)
+                                # — otherwise c2 tracks the wrong frame and is
+                                # insensitive to c1's actual rotation.
+                                c1_orient_per_edge = cro_t[:, 0:1].repeat(1, c2_local_idx + 1, 1)
+
+                                # Edge1
+                                c1_as_parent, child2_verts, c1_orient_per_edge, cro_t[:, 1] = \
                                     self.constraints_enforcement.Rotation_Constraint_Single_Junction(
-                                        c1_as_parent, child2_verts, pro_t, cro_t[:, 1],
+                                        c1_as_parent, child2_verts, c1_orient_per_edge, cro_t[:, 1],
                                         prev_child1, prev_child2,
                                         c2_local_idx - 1, self.child2_momentum_scale_previous)
                                 prev_child1 = c1_as_parent.clone()
                                 prev_child2 = child2_verts.clone()
 
-                                c1_as_parent, child2_verts, pro_t, cro_t[:, 1] = \
+                                # Edge2
+                                c1_as_parent, child2_verts, c1_orient_per_edge, cro_t[:, 1] = \
                                     self.constraints_enforcement.Rotation_Constraint_Single_Junction(
-                                        c1_as_parent, child2_verts, pro_t, cro_t[:, 1],
+                                        c1_as_parent, child2_verts, c1_orient_per_edge, cro_t[:, 1],
                                         prev_child1, prev_child2,
                                         c2_local_idx, self.child2_momentum_scale_next)
                                 prev_child1 = c1_as_parent.clone()
                                 prev_child2 = child2_verts.clone()
+
+                                # Write c1's updated orientation back (latest slot).
+                                cro_t[:, 0] = c1_orient_per_edge[:, c2_local_idx]
+
+                                # Coplanarity for child2: correct only the
+                                # out-of-plane component (axial rotation DOF).
+                                # Plane from parent edge + child1 edge (child1
+                                # edges alone are too collinear).
+                                e_par_dir = pv_t[:, c1_idx + 1] - pv_t[:, c1_idx]
+                                e_c1_dir = c1_as_parent[:, 1] - c1_as_parent[:, 0]
+                                pn2 = torch.cross(e_par_dir, e_c1_dir, dim=-1)
+                                pn2_norm = pn2.norm(dim=-1, keepdim=True)
+                                if pn2_norm.min() > 1e-6:
+                                    pn2 = pn2 / pn2_norm
+                                    e_c2 = child2_verts[:, 1] - child2_verts[:, 0]
+                                    e_c2_len = e_c2.norm(dim=-1, keepdim=True)
+                                    # _c2_oop_ratio pre-computed from GT initial frame
+                                    current_oop2 = (e_c2 * pn2).sum(-1, keepdim=True)
+                                    target_oop2 = self._c2_oop_ratio * e_c2_len
+                                    e_c2_corrected = e_c2 + (target_oop2 - current_oop2) * pn2
+                                    e_c2_corrected_norm = e_c2_corrected.norm(dim=-1, keepdim=True)
+                                    if e_c2_corrected_norm.min() > 1e-6:
+                                        child2_verts = child2_verts.clone()
+                                        child2_verts[:, 1] = child2_verts[:, 0] + e_c2_corrected / e_c2_corrected_norm * e_c2_len
+                                        prev_child2 = child2_verts.clone()
 
                                 cv_t[:, 0] = c1_as_parent
                                 cv_t[:, 1] = child2_verts
@@ -1286,6 +1367,55 @@ class DEFT_sim(nn.Module):
                             previous_children_vertices_iteration_edge[:, 0] = prev_child1.numpy().astype(np.float64)
                             if self.use_child2_orientation:
                                 previous_children_vertices_iteration_edge[:, 1] = prev_child2.numpy().astype(np.float64)
+                        elif self.bdlo6:
+                            # BDLO6: 3 children all attached to parent.
+                            # Use torch Rotation_Constraint_Single_Junction sequentially.
+                            pv_t = torch.from_numpy(parent_vertices).to(torch.float64)
+                            cv_t = torch.from_numpy(children_vertices).to(torch.float64)
+                            pro_t = torch.from_numpy(parent_rod_orientation).to(torch.float64)
+                            cro_t = torch.from_numpy(children_rod_orientation).to(torch.float64)
+                            prev_pv1_t = torch.from_numpy(previous_parent_vertices_iteration_edge1).to(torch.float64)
+                            prev_pv2_t = torch.from_numpy(previous_parent_vertices_iteration_edge2).to(torch.float64)
+                            prev_cv_t = torch.from_numpy(previous_children_vertices_iteration_edge).to(torch.float64)
+
+                            n_children_b6 = len(self.rigid_body_coupling_index)
+                            prev_children_local = [prev_cv_t[:, c_i].clone() for c_i in range(n_children_b6)]
+
+                            for c_i in range(n_children_b6):
+                                p_idx = self.rigid_body_coupling_index[c_i]
+                                child_verts_local = cv_t[:, c_i]
+
+                                pv_t, child_verts_local, pro_t, _new_c_orient = \
+                                    self.constraints_enforcement.Rotation_Constraint_Single_Junction(
+                                        pv_t, child_verts_local,
+                                        pro_t, cro_t[:, c_i],
+                                        prev_pv1_t, prev_children_local[c_i],
+                                        p_idx - 1,
+                                        self.bdlo6_momentum_scale_prev_list[c_i])
+                                cro_t = torch.cat([cro_t[:, :c_i], _new_c_orient.unsqueeze(1), cro_t[:, c_i + 1:]], dim=1)
+                                prev_pv1_t = pv_t.clone()
+                                prev_children_local[c_i] = child_verts_local.clone()
+
+                                pv_t, child_verts_local, pro_t, _new_c_orient = \
+                                    self.constraints_enforcement.Rotation_Constraint_Single_Junction(
+                                        pv_t, child_verts_local,
+                                        pro_t, cro_t[:, c_i],
+                                        prev_pv2_t, prev_children_local[c_i],
+                                        p_idx,
+                                        self.bdlo6_momentum_scale_next_list[c_i])
+                                cro_t = torch.cat([cro_t[:, :c_i], _new_c_orient.unsqueeze(1), cro_t[:, c_i + 1:]], dim=1)
+                                prev_pv2_t = pv_t.clone()
+                                prev_children_local[c_i] = child_verts_local.clone()
+
+                                cv_t = torch.cat([cv_t[:, :c_i], child_verts_local.unsqueeze(1), cv_t[:, c_i + 1:]], dim=1)
+
+                            parent_vertices = pv_t.numpy().astype(np.float64)
+                            children_vertices = cv_t.numpy().astype(np.float64)
+                            parent_rod_orientation = pro_t.numpy().astype(np.float64)
+                            children_rod_orientation = cro_t.numpy().astype(np.float64)
+                            previous_parent_vertices_iteration_edge1 = prev_pv1_t.numpy().astype(np.float64)
+                            previous_parent_vertices_iteration_edge2 = prev_pv2_t.numpy().astype(np.float64)
+                            previous_children_vertices_iteration_edge = torch.stack(prev_children_local, dim=1).numpy().astype(np.float64)
                         else:
                             # Edge1
                             parent_vertices, parent_rod_orientation, children_vertices, children_rod_orientation = \
@@ -1337,6 +1467,7 @@ class DEFT_sim(nn.Module):
                             self.selected_children_index,
                             bdlo5=int(self.bdlo5),
                             child2_coupling_mass_scale=(child2_coupling_mass_scale_numpy if self.bdlo5 else None),
+                            bdlo6=int(self.bdlo6),
                         )
                     else:
                         # Naive snap: pin each child's root to the parent junction
@@ -1366,7 +1497,7 @@ class DEFT_sim(nn.Module):
                 parent_rod_orientation = torch.from_numpy(parent_rod_orientation).to(torch.float64)
                 children_rod_orientation = torch.from_numpy(children_rod_orientation).to(torch.float64)
             else:
-                for _ in range(constraint_loop):
+                for constraint_loop_i in range(constraint_loop):
                     parent_vertices = b_DLOs_vertices[self.selected_parent_index]
                     children_vertices = b_DLOs_vertices[self.selected_children_index].view(self.batch, -1, self.n_vert, 3)
 
@@ -1408,15 +1539,46 @@ class DEFT_sim(nn.Module):
                             ], dim=1)
                             previous_parent_vertices_iteration_edge2 = parent_vertices.clone()
                             prev_child1_verts = child1_verts.clone()
+
+                            # Coplanarity for child1 (matches the numba path):
+                            # correct the out-of-plane component (axial rotation
+                            # DOF) relative to the parent bending plane, with
+                            # the GT-initial-frame ratio decaying linearly to 0
+                            # over 20 steps.
+                            e_p1 = parent_vertices[:, c1_idx] - parent_vertices[:, c1_idx - 1]
+                            e_p2 = parent_vertices[:, c1_idx + 1] - parent_vertices[:, c1_idx]
+                            pn = torch.cross(e_p1, e_p2, dim=-1)
+                            pn_norm = pn.norm(dim=-1, keepdim=True)
+                            if pn_norm.min() > 1e-6:
+                                pn = pn / pn_norm
+                                e_c = child1_verts[:, 1] - child1_verts[:, 0]
+                                e_c_len = e_c.norm(dim=-1, keepdim=True)
+                                _decay = max(0.0, 1.0 - ith / 20.0)
+                                current_oop = (e_c * pn).sum(-1, keepdim=True)
+                                target_oop = (_decay * self._c1_oop_ratio) * e_c_len
+                                e_c_corrected = e_c + (target_oop - current_oop) * pn
+                                e_c_corrected_norm = e_c_corrected.norm(dim=-1, keepdim=True)
+                                if e_c_corrected_norm.min() > 1e-6:
+                                    child1_verts = child1_verts.clone()
+                                    child1_verts[:, 1] = child1_verts[:, 0] + e_c_corrected / e_c_corrected_norm * e_c_len
+                                    prev_child1_verts = child1_verts.clone()
+
                             children_vertices[:, 0] = child1_verts
 
                             # Child2 vs child1 — use child1 as "parent" for child2
                             if self.use_child2_orientation:
                                 child1_verts_as_parent = children_vertices[:, 0].clone()
-                                child1_verts_as_parent, child2_verts, parent_rod_orientation, _new_c2_orient = \
+                                # c1 acts as the "parent" for c2's orientation enforcement.
+                                # Use c1's own rod-level quaternion as the alignment
+                                # reference (not the main parent's per-edge orientations)
+                                # — otherwise c2 tracks the wrong frame and is
+                                # insensitive to c1's actual rotation.
+                                c1_orient_per_edge = children_rod_orientation[:, 0:1].repeat(1, c2_local_idx + 1, 1)
+
+                                child1_verts_as_parent, child2_verts, c1_orient_per_edge, _new_c2_orient = \
                                     self.constraints_enforcement.Rotation_Constraint_Single_Junction(
                                         child1_verts_as_parent, child2_verts,
-                                        parent_rod_orientation, children_rod_orientation[:, 1],
+                                        c1_orient_per_edge, children_rod_orientation[:, 1],
                                         prev_child1_verts, prev_child2_verts,
                                         c2_local_idx - 1, self.child2_momentum_scale_previous)
                                 children_rod_orientation = torch.cat([
@@ -1426,10 +1588,10 @@ class DEFT_sim(nn.Module):
                                 prev_child1_verts = child1_verts_as_parent.clone()
                                 prev_child2_verts = child2_verts.clone()
 
-                                child1_verts_as_parent, child2_verts, parent_rod_orientation, _new_c2_orient = \
+                                child1_verts_as_parent, child2_verts, c1_orient_per_edge, _new_c2_orient = \
                                     self.constraints_enforcement.Rotation_Constraint_Single_Junction(
                                         child1_verts_as_parent, child2_verts,
-                                        parent_rod_orientation, children_rod_orientation[:, 1],
+                                        c1_orient_per_edge, children_rod_orientation[:, 1],
                                         prev_child1_verts, prev_child2_verts,
                                         c2_local_idx, self.child2_momentum_scale_next)
                                 children_rod_orientation = torch.cat([
@@ -1438,6 +1600,33 @@ class DEFT_sim(nn.Module):
                                 ], dim=1)
                                 prev_child1_verts = child1_verts_as_parent.clone()
                                 prev_child2_verts = child2_verts.clone()
+
+                                # Write c1's updated orientation back (latest slot).
+                                children_rod_orientation = torch.cat([
+                                    c1_orient_per_edge[:, c2_local_idx:c2_local_idx + 1],
+                                    children_rod_orientation[:, 1:]
+                                ], dim=1)
+
+                                # Coplanarity for child2: correct only the
+                                # out-of-plane component (axial rotation DOF).
+                                e_par_dir = parent_vertices[:, c1_idx + 1] - parent_vertices[:, c1_idx]
+                                e_c1_dir = child1_verts_as_parent[:, 1] - child1_verts_as_parent[:, 0]
+                                pn2 = torch.cross(e_par_dir, e_c1_dir, dim=-1)
+                                pn2_norm = pn2.norm(dim=-1, keepdim=True)
+                                if pn2_norm.min() > 1e-6:
+                                    pn2 = pn2 / pn2_norm
+                                    e_c2 = child2_verts[:, 1] - child2_verts[:, 0]
+                                    e_c2_len = e_c2.norm(dim=-1, keepdim=True)
+                                    # _c2_oop_ratio pre-computed from GT initial frame
+                                    current_oop2 = (e_c2 * pn2).sum(-1, keepdim=True)
+                                    target_oop2 = self._c2_oop_ratio * e_c2_len
+                                    e_c2_corrected = e_c2 + (target_oop2 - current_oop2) * pn2
+                                    e_c2_corrected_norm = e_c2_corrected.norm(dim=-1, keepdim=True)
+                                    if e_c2_corrected_norm.min() > 1e-6:
+                                        child2_verts = child2_verts.clone()
+                                        child2_verts[:, 1] = child2_verts[:, 0] + e_c2_corrected / e_c2_corrected_norm * e_c2_len
+                                        prev_child2_verts = child2_verts.clone()
+
                                 children_vertices[:, 0] = child1_verts_as_parent
                                 children_vertices[:, 1] = child2_verts
 
@@ -1811,6 +2000,26 @@ class DEFT_sim(nn.Module):
             inference_1_batch
         )
 
+        # Pre-compute GT-initial-frame out-of-plane ratios used by the c1/c2
+        # coplanar corrections during the constraint loop.
+        if self.bdlo5:
+            _init_verts = b_DLOs_vertices_traj[:, 0].reshape(-1, self.n_vert, 3)
+            _init_pv = _init_verts[self.selected_parent_index[0]]
+            _init_c1v = _init_verts[self.selected_children_index[0]]
+            _init_c2v = _init_verts[self.selected_children_index[1]]
+            _c1_idx = self.rigid_body_coupling_index[0]
+            _ep1 = _init_pv[_c1_idx] - _init_pv[_c1_idx - 1]
+            _ep2 = _init_pv[_c1_idx + 1] - _init_pv[_c1_idx]
+            _pn = torch.cross(_ep1, _ep2, dim=-1)
+            _pn = _pn / (_pn.norm() + 1e-10)
+            _ec1 = _init_c1v[1] - _init_c1v[0]
+            self._c1_oop_ratio = (_ec1 * _pn).sum().unsqueeze(0).unsqueeze(0) / _ec1.norm().unsqueeze(0).unsqueeze(0)
+            if self.use_child2_orientation:
+                _pn2 = torch.cross(_ep2, _ec1, dim=-1)
+                _pn2 = _pn2 / (_pn2.norm() + 1e-10)
+                _ec2 = _init_c2v[1] - _init_c2v[0]
+                self._c2_oop_ratio = (_ec2 * _pn2).sum().unsqueeze(0).unsqueeze(0) / _ec2.norm().unsqueeze(0).unsqueeze(0)
+
         # Main loop over timesteps
         for ith in range(time_horizon):
             # 1) Retrieve current/previous BDLO states
@@ -2067,24 +2276,82 @@ class DEFT_sim(nn.Module):
                             prev_pv2_t = pv_t.clone()
                             prev_child1 = child1_verts.clone()
 
+                            # Coplanarity for child1: correct the out-of-plane
+                            # component (axial rotation DOF) relative to the
+                            # parent bending plane. The target ratio comes from
+                            # the GT initial frame and decays linearly to 0
+                            # over 20 steps — the GT snapshot is a dynamic
+                            # pose, not a rest one, so we fade toward true
+                            # coplanar.
+                            e_p1 = pv_t[:, c1_idx] - pv_t[:, c1_idx - 1]
+                            e_p2 = pv_t[:, c1_idx + 1] - pv_t[:, c1_idx]
+                            pn = torch.cross(e_p1, e_p2, dim=-1)
+                            pn_norm = pn.norm(dim=-1, keepdim=True)
+                            if pn_norm.min() > 1e-6:
+                                pn = pn / pn_norm
+                                e_c = child1_verts[:, 1] - child1_verts[:, 0]
+                                e_c_len = e_c.norm(dim=-1, keepdim=True)
+                                _decay = max(0.0, 1.0 - ith / 20.0)
+                                current_oop = (e_c * pn).sum(-1, keepdim=True)
+                                target_oop = (_decay * self._c1_oop_ratio) * e_c_len
+                                e_c_corrected = e_c + (target_oop - current_oop) * pn
+                                e_c_corrected_norm = e_c_corrected.norm(dim=-1, keepdim=True)
+                                if e_c_corrected_norm.min() > 1e-6:
+                                    child1_verts = child1_verts.clone()
+                                    child1_verts[:, 1] = child1_verts[:, 0] + e_c_corrected / e_c_corrected_norm * e_c_len
+                                    prev_child1 = child1_verts.clone()
+
                             # Child2 vs child1
                             if self.use_child2_orientation:
                                 c1_as_parent = child1_verts.clone()
-                                c1_as_parent, child2_verts, pro_t, cro_t[:, 1] = \
+                                # c1 acts as the "parent" for c2's orientation enforcement.
+                                # Use c1's own rod-level quaternion as the alignment
+                                # reference (not the main parent's per-edge orientations)
+                                # — otherwise c2 tracks the wrong frame and is
+                                # insensitive to c1's actual rotation.
+                                c1_orient_per_edge = cro_t[:, 0:1].repeat(1, c2_local_idx + 1, 1)
+
+                                # Edge1
+                                c1_as_parent, child2_verts, c1_orient_per_edge, cro_t[:, 1] = \
                                     self.constraints_enforcement.Rotation_Constraint_Single_Junction(
-                                        c1_as_parent, child2_verts, pro_t, cro_t[:, 1],
+                                        c1_as_parent, child2_verts, c1_orient_per_edge, cro_t[:, 1],
                                         prev_child1, prev_child2,
                                         c2_local_idx - 1, self.child2_momentum_scale_previous)
                                 prev_child1 = c1_as_parent.clone()
                                 prev_child2 = child2_verts.clone()
 
-                                c1_as_parent, child2_verts, pro_t, cro_t[:, 1] = \
+                                # Edge2
+                                c1_as_parent, child2_verts, c1_orient_per_edge, cro_t[:, 1] = \
                                     self.constraints_enforcement.Rotation_Constraint_Single_Junction(
-                                        c1_as_parent, child2_verts, pro_t, cro_t[:, 1],
+                                        c1_as_parent, child2_verts, c1_orient_per_edge, cro_t[:, 1],
                                         prev_child1, prev_child2,
                                         c2_local_idx, self.child2_momentum_scale_next)
                                 prev_child1 = c1_as_parent.clone()
                                 prev_child2 = child2_verts.clone()
+
+                                # Write c1's updated orientation back (latest slot).
+                                cro_t[:, 0] = c1_orient_per_edge[:, c2_local_idx]
+
+                                # Coplanarity for child2: correct only the
+                                # out-of-plane component (axial rotation DOF).
+                                # Plane from parent edge + child1 edge (child1
+                                # edges alone are too collinear).
+                                e_par_dir = pv_t[:, c1_idx + 1] - pv_t[:, c1_idx]
+                                e_c1_dir = c1_as_parent[:, 1] - c1_as_parent[:, 0]
+                                pn2 = torch.cross(e_par_dir, e_c1_dir, dim=-1)
+                                pn2_norm = pn2.norm(dim=-1, keepdim=True)
+                                if pn2_norm.min() > 1e-6:
+                                    pn2 = pn2 / pn2_norm
+                                    e_c2 = child2_verts[:, 1] - child2_verts[:, 0]
+                                    e_c2_len = e_c2.norm(dim=-1, keepdim=True)
+                                    current_oop2 = (e_c2 * pn2).sum(-1, keepdim=True)
+                                    target_oop2 = self._c2_oop_ratio * e_c2_len
+                                    e_c2_corrected = e_c2 + (target_oop2 - current_oop2) * pn2
+                                    e_c2_corrected_norm = e_c2_corrected.norm(dim=-1, keepdim=True)
+                                    if e_c2_corrected_norm.min() > 1e-6:
+                                        child2_verts = child2_verts.clone()
+                                        child2_verts[:, 1] = child2_verts[:, 0] + e_c2_corrected / e_c2_corrected_norm * e_c2_len
+                                        prev_child2 = child2_verts.clone()
 
                                 cv_t[:, 0] = c1_as_parent
                                 cv_t[:, 1] = child2_verts
@@ -2104,6 +2371,55 @@ class DEFT_sim(nn.Module):
                             previous_children_vertices_iteration_edge[:, 0] = prev_child1.numpy().astype(np.float64)
                             if self.use_child2_orientation:
                                 previous_children_vertices_iteration_edge[:, 1] = prev_child2.numpy().astype(np.float64)
+                        elif self.bdlo6:
+                            # BDLO6: 3 children all attached to parent.
+                            # Use torch Rotation_Constraint_Single_Junction sequentially.
+                            pv_t = torch.from_numpy(parent_vertices).to(torch.float64)
+                            cv_t = torch.from_numpy(children_vertices).to(torch.float64)
+                            pro_t = torch.from_numpy(parent_rod_orientation).to(torch.float64)
+                            cro_t = torch.from_numpy(children_rod_orientation).to(torch.float64)
+                            prev_pv1_t = torch.from_numpy(previous_parent_vertices_iteration_edge1).to(torch.float64)
+                            prev_pv2_t = torch.from_numpy(previous_parent_vertices_iteration_edge2).to(torch.float64)
+                            prev_cv_t = torch.from_numpy(previous_children_vertices_iteration_edge).to(torch.float64)
+
+                            n_children_b6 = len(self.rigid_body_coupling_index)
+                            prev_children_local = [prev_cv_t[:, c_i].clone() for c_i in range(n_children_b6)]
+
+                            for c_i in range(n_children_b6):
+                                p_idx = self.rigid_body_coupling_index[c_i]
+                                child_verts_local = cv_t[:, c_i]
+
+                                pv_t, child_verts_local, pro_t, _new_c_orient = \
+                                    self.constraints_enforcement.Rotation_Constraint_Single_Junction(
+                                        pv_t, child_verts_local,
+                                        pro_t, cro_t[:, c_i],
+                                        prev_pv1_t, prev_children_local[c_i],
+                                        p_idx - 1,
+                                        self.bdlo6_momentum_scale_prev_list[c_i])
+                                cro_t = torch.cat([cro_t[:, :c_i], _new_c_orient.unsqueeze(1), cro_t[:, c_i + 1:]], dim=1)
+                                prev_pv1_t = pv_t.clone()
+                                prev_children_local[c_i] = child_verts_local.clone()
+
+                                pv_t, child_verts_local, pro_t, _new_c_orient = \
+                                    self.constraints_enforcement.Rotation_Constraint_Single_Junction(
+                                        pv_t, child_verts_local,
+                                        pro_t, cro_t[:, c_i],
+                                        prev_pv2_t, prev_children_local[c_i],
+                                        p_idx,
+                                        self.bdlo6_momentum_scale_next_list[c_i])
+                                cro_t = torch.cat([cro_t[:, :c_i], _new_c_orient.unsqueeze(1), cro_t[:, c_i + 1:]], dim=1)
+                                prev_pv2_t = pv_t.clone()
+                                prev_children_local[c_i] = child_verts_local.clone()
+
+                                cv_t = torch.cat([cv_t[:, :c_i], child_verts_local.unsqueeze(1), cv_t[:, c_i + 1:]], dim=1)
+
+                            parent_vertices = pv_t.numpy().astype(np.float64)
+                            children_vertices = cv_t.numpy().astype(np.float64)
+                            parent_rod_orientation = pro_t.numpy().astype(np.float64)
+                            children_rod_orientation = cro_t.numpy().astype(np.float64)
+                            previous_parent_vertices_iteration_edge1 = prev_pv1_t.numpy().astype(np.float64)
+                            previous_parent_vertices_iteration_edge2 = prev_pv2_t.numpy().astype(np.float64)
+                            previous_children_vertices_iteration_edge = torch.stack(prev_children_local, dim=1).numpy().astype(np.float64)
                         else:
                             # Edge1
                             parent_vertices, parent_rod_orientation, children_vertices, children_rod_orientation = \
@@ -2155,6 +2471,7 @@ class DEFT_sim(nn.Module):
                             self.selected_children_index,
                             bdlo5=int(self.bdlo5),
                             child2_coupling_mass_scale=(child2_coupling_mass_scale_numpy if self.bdlo5 else None),
+                            bdlo6=int(self.bdlo6),
                         )
                     else:
                         # Naive snap: pin each child's root to the parent junction
@@ -2184,7 +2501,7 @@ class DEFT_sim(nn.Module):
                 parent_rod_orientation = torch.from_numpy(parent_rod_orientation).to(torch.float64)
                 children_rod_orientation = torch.from_numpy(children_rod_orientation).to(torch.float64)
             else:
-                for _ in range(constraint_loop):
+                for constraint_loop_i in range(constraint_loop):
                     parent_vertices = b_DLOs_vertices[self.selected_parent_index]
                     children_vertices = b_DLOs_vertices[self.selected_children_index].view(self.batch, -1, self.n_vert, 3)
 
@@ -2226,15 +2543,46 @@ class DEFT_sim(nn.Module):
                             ], dim=1)
                             previous_parent_vertices_iteration_edge2 = parent_vertices.clone()
                             prev_child1_verts = child1_verts.clone()
+
+                            # Coplanarity for child1 (matches the numba path):
+                            # correct the out-of-plane component (axial rotation
+                            # DOF) relative to the parent bending plane, with
+                            # the GT-initial-frame ratio decaying linearly to 0
+                            # over 20 steps.
+                            e_p1 = parent_vertices[:, c1_idx] - parent_vertices[:, c1_idx - 1]
+                            e_p2 = parent_vertices[:, c1_idx + 1] - parent_vertices[:, c1_idx]
+                            pn = torch.cross(e_p1, e_p2, dim=-1)
+                            pn_norm = pn.norm(dim=-1, keepdim=True)
+                            if pn_norm.min() > 1e-6:
+                                pn = pn / pn_norm
+                                e_c = child1_verts[:, 1] - child1_verts[:, 0]
+                                e_c_len = e_c.norm(dim=-1, keepdim=True)
+                                _decay = max(0.0, 1.0 - ith / 20.0)
+                                current_oop = (e_c * pn).sum(-1, keepdim=True)
+                                target_oop = (_decay * self._c1_oop_ratio) * e_c_len
+                                e_c_corrected = e_c + (target_oop - current_oop) * pn
+                                e_c_corrected_norm = e_c_corrected.norm(dim=-1, keepdim=True)
+                                if e_c_corrected_norm.min() > 1e-6:
+                                    child1_verts = child1_verts.clone()
+                                    child1_verts[:, 1] = child1_verts[:, 0] + e_c_corrected / e_c_corrected_norm * e_c_len
+                                    prev_child1_verts = child1_verts.clone()
+
                             children_vertices[:, 0] = child1_verts
 
                             # Child2 vs child1 — use child1 as "parent" for child2
                             if self.use_child2_orientation:
                                 child1_verts_as_parent = children_vertices[:, 0].clone()
-                                child1_verts_as_parent, child2_verts, parent_rod_orientation, _new_c2_orient = \
+                                # c1 acts as the "parent" for c2's orientation enforcement.
+                                # Use c1's own rod-level quaternion as the alignment
+                                # reference (not the main parent's per-edge orientations)
+                                # — otherwise c2 tracks the wrong frame and is
+                                # insensitive to c1's actual rotation.
+                                c1_orient_per_edge = children_rod_orientation[:, 0:1].repeat(1, c2_local_idx + 1, 1)
+
+                                child1_verts_as_parent, child2_verts, c1_orient_per_edge, _new_c2_orient = \
                                     self.constraints_enforcement.Rotation_Constraint_Single_Junction(
                                         child1_verts_as_parent, child2_verts,
-                                        parent_rod_orientation, children_rod_orientation[:, 1],
+                                        c1_orient_per_edge, children_rod_orientation[:, 1],
                                         prev_child1_verts, prev_child2_verts,
                                         c2_local_idx - 1, self.child2_momentum_scale_previous)
                                 children_rod_orientation = torch.cat([
@@ -2244,10 +2592,10 @@ class DEFT_sim(nn.Module):
                                 prev_child1_verts = child1_verts_as_parent.clone()
                                 prev_child2_verts = child2_verts.clone()
 
-                                child1_verts_as_parent, child2_verts, parent_rod_orientation, _new_c2_orient = \
+                                child1_verts_as_parent, child2_verts, c1_orient_per_edge, _new_c2_orient = \
                                     self.constraints_enforcement.Rotation_Constraint_Single_Junction(
                                         child1_verts_as_parent, child2_verts,
-                                        parent_rod_orientation, children_rod_orientation[:, 1],
+                                        c1_orient_per_edge, children_rod_orientation[:, 1],
                                         prev_child1_verts, prev_child2_verts,
                                         c2_local_idx, self.child2_momentum_scale_next)
                                 children_rod_orientation = torch.cat([
@@ -2256,6 +2604,33 @@ class DEFT_sim(nn.Module):
                                 ], dim=1)
                                 prev_child1_verts = child1_verts_as_parent.clone()
                                 prev_child2_verts = child2_verts.clone()
+
+                                # Write c1's updated orientation back (latest slot).
+                                children_rod_orientation = torch.cat([
+                                    c1_orient_per_edge[:, c2_local_idx:c2_local_idx + 1],
+                                    children_rod_orientation[:, 1:]
+                                ], dim=1)
+
+                                # Coplanarity for child2: correct only the
+                                # out-of-plane component (axial rotation DOF).
+                                e_par_dir = parent_vertices[:, c1_idx + 1] - parent_vertices[:, c1_idx]
+                                e_c1_dir = child1_verts_as_parent[:, 1] - child1_verts_as_parent[:, 0]
+                                pn2 = torch.cross(e_par_dir, e_c1_dir, dim=-1)
+                                pn2_norm = pn2.norm(dim=-1, keepdim=True)
+                                if pn2_norm.min() > 1e-6:
+                                    pn2 = pn2 / pn2_norm
+                                    e_c2 = child2_verts[:, 1] - child2_verts[:, 0]
+                                    e_c2_len = e_c2.norm(dim=-1, keepdim=True)
+                                    # _c2_oop_ratio pre-computed from GT initial frame
+                                    current_oop2 = (e_c2 * pn2).sum(-1, keepdim=True)
+                                    target_oop2 = self._c2_oop_ratio * e_c2_len
+                                    e_c2_corrected = e_c2 + (target_oop2 - current_oop2) * pn2
+                                    e_c2_corrected_norm = e_c2_corrected.norm(dim=-1, keepdim=True)
+                                    if e_c2_corrected_norm.min() > 1e-6:
+                                        child2_verts = child2_verts.clone()
+                                        child2_verts[:, 1] = child2_verts[:, 0] + e_c2_corrected / e_c2_corrected_norm * e_c2_len
+                                        prev_child2_verts = child2_verts.clone()
+
                                 children_vertices[:, 0] = child1_verts_as_parent
                                 children_vertices[:, 1] = child2_verts
 

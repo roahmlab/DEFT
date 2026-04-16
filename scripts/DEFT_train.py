@@ -318,8 +318,11 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
 
         rigid_body_coupling_index = [5, 1]
 
-        parent_mass_scale = 1.
-        parent_moment_scale = 10.
+        # Match visualizations/predict_bdlo5_biased.py: treat the parent rod as
+        # effectively infinite mass/MOI relative to the children so that c1 (and
+        # transitively c2) absorbs all attachment-coupling correction.
+        parent_mass_scale = 1e6
+        parent_moment_scale = 1e6
         moment_ratio = 0.1
         children_moment_scale = (0.5, 0.5)
         children_mass_scale = (1, 1)
@@ -415,9 +418,9 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             BDLO6_RIGID_BODY_COUPLING_INDEX,
         )
 
-        if training_mode not in ("physics", "residual"):
+        if training_mode not in ("physics", "residual", "full"):
             raise NotImplementedError(
-                f"BDLO6 supports --training_mode physics or residual (got '{training_mode}').")
+                f"BDLO6 supports --training_mode physics, residual, or full (got '{training_mode}').")
 
         # Local hyperparameters mirroring BDLO5 defaults
         n_vert     = n_parent_vertices
@@ -475,7 +478,10 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             eval_time_horizon=eval_time_horizon_local,
             device=device,
         )
-        eval_batch_local = len(eval_ds)
+        if inference_1_batch:
+            eval_batch_local = 1
+        else:
+            eval_batch_local = len(eval_ds)
         print(f"  using {eval_batch_local} eval samples")
 
         print("Loading BDLO6 train dataset...")
@@ -553,7 +559,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
 
         # ---- Load pretrained checkpoint if requested ----
         if load_model:
-            pretrained_path = "../save_model/BDLO6/DEFT_ends_6_pretrained_wo_residual.pth"
+            pretrained_path = "../save_model/BDLO6/DEFT_ends_6_pretrained_full_model.pth"
             if os.path.exists(pretrained_path):
                 pretrained_dict = torch.load(pretrained_path)
                 pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'adjacency_batch' not in k}
@@ -608,6 +614,9 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
             sim_train.DEFT_func.bend_stiffness_child3.requires_grad = False
             optimizer = optim.Adam(residual_params, eps=1e-8)
             print("BDLO6 training mode: residual only (physics frozen)")
+        elif training_mode == "full":
+            optimizer = optim.Adam(physics_params + residual_params, eps=1e-8)
+            print("BDLO6 training mode: full (physics + residual)")
 
         loss_func = torch.nn.MSELoss()
         dt = 0.01
@@ -638,7 +647,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
                         curr, prev, target,
                         loss_func, dt,
                         parent_theta_clamp_local, child1_theta_clamp_local, child2_theta_clamp_local,
-                        False,                          # inference_1_batch
+                        inference_1_batch,
                         vis_type="DEFT_6",
                         vis=vis_this_eval,
                     )
@@ -868,6 +877,33 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         use_attachment_constraints=use_attachment_constraints,
         bdlo5=bdlo5
     )
+
+    # For BDLO5, override both the c2↔c1 coupling mass scale and the c2↔c1
+    # rotation (momentum) scale so c1 is treated as effectively infinite-mass
+    # and infinite-MOI: c1 absorbs ~0 of the position/rotation correction at
+    # the c2 attachment and c2 absorbs ~all of it. Mirrors the inference setup
+    # in visualizations/predict_bdlo5_biased.py so training and inference see
+    # consistent attachment physics.
+    if BDLO_type == 5:
+        _extreme_c2_coupling = torch.tensor(
+            [[[[0., 0., 0.], [0., 0., 0.], [0., 0., 0.]],
+              [[-1., 0., 0.], [0., -1., 0.], [0., 0., -1.]]]],
+            dtype=torch.float64,
+        )
+        DEFT_sim_train.child2_coupling_mass_scale = _extreme_c2_coupling
+        DEFT_sim_eval.child2_coupling_mass_scale = _extreme_c2_coupling.clone()
+
+        def _make_extreme_c2_momentum(batch_):
+            # Shape (batch, 2, 3, 3). Slot [:, 0] is the c1-side correction
+            # (zeroed), slot [:, 1] is the c2-side correction (identity).
+            m = torch.zeros(batch_, 2, 3, 3, dtype=torch.float64)
+            m[:, 1] = torch.eye(3, dtype=torch.float64)
+            return m
+
+        DEFT_sim_train.child2_momentum_scale_previous = _make_extreme_c2_momentum(train_batch)
+        DEFT_sim_train.child2_momentum_scale_next     = _make_extreme_c2_momentum(train_batch)
+        DEFT_sim_eval.child2_momentum_scale_previous  = _make_extreme_c2_momentum(eval_batch)
+        DEFT_sim_eval.child2_momentum_scale_next      = _make_extreme_c2_momentum(eval_batch)
 
     # Load pretrained models for initialization depending on BDLO_type and clamp_type
     # Always loads full model (physics + GNN) when available
@@ -1214,22 +1250,22 @@ if __name__ == "__main__":
     parser.add_argument("--train_time_horizon", type=int, default=50)
 
     # Whether to visualize the initial undeformed vertices
-    parser.add_argument("--undeform_vis", type=bool, default=False)
+    parser.add_argument("--undeform_vis", type=lambda x: x.lower() == 'true', default=False)
 
     # Whether we do inference only for 1 batch (for speed) or for all eval sets
     parser.add_argument("--inference_1_batch", type=lambda x: x.lower() == 'true', default=False)
 
     # Whether to enable residual learning: if True, GNN-based updates are used
-    parser.add_argument("--residual_learning", type=bool, default=False)
+    parser.add_argument("--residual_learning", type=lambda x: x.lower() == 'true', default=False)
 
     # Training batch size
     parser.add_argument("--train_batch", type=int, default=32)
 
     # Whether to visualize inference results (for debugging)
-    parser.add_argument("--inference_vis", type=bool, default=False)
+    parser.add_argument("--inference_vis", type=lambda x: x.lower() == 'true', default=False)
 
     # load trained model
-    parser.add_argument("--load_model", type=bool, default=False)
+    parser.add_argument("--load_model", type=lambda x: x.lower() == 'true', default=False)
 
     # training_mode: "physics" (material params only), "residual" (GNN only, physics frozen), "full" (both)
     parser.add_argument("--training_mode", type=str, default="physics", choices=["physics", "residual", "full"])

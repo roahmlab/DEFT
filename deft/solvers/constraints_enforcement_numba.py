@@ -795,12 +795,13 @@ class constraints_enforcement_numba(nn.Module):
             self,
             parent_vertices,  # shape (1,n_vert,3)
             child_vertices,  # shape (n_children,n_vert,3)
-            coupling_index,  # e.g. [4,8]
+            coupling_index,  # e.g. [4,8] or [2,7,7]
             coupling_mass_scale,  # shape (n_children,2,3,3) — c1↔parent for bdlo5
             selected_parent_index,  # e.g. [0]
-            selected_children_index,  # e.g. [1,2]
+            selected_children_index,  # e.g. [1,2] or [1,2,3]
             bdlo5=0,
             child2_coupling_mass_scale=None,  # shape (1,2,3,3) — c2↔c1 for bdlo5 (mass-blended)
+            bdlo6=0,
     ):
 
 
@@ -817,7 +818,17 @@ class constraints_enforcement_numba(nn.Module):
         cms_np = coupling_mass_scale
 
         # 1) Call the Numba core
-        if bdlo5:
+        if bdlo6:
+            # BDLO6: 3 children all attached to parent. Process sequentially
+            # to avoid duplicate-index overwrites (coupling_index = [2, 7, 7]).
+            n_children = ci_np.shape[0]  # 3
+            for c_i in range(n_children):
+                ci_single = np.array([ci_np[c_i]], dtype=np.int64)
+                cms_single = cms_np[c_i:c_i + 1]  # (1, 2, 3, 3)
+                c_single = c_np[c_i:c_i + 1]      # (1, n_vert, 3)
+                p_np, c_upd_single = _numba_coupling_core(p_np, c_single, ci_single, cms_single)
+                c_np[c_i:c_i + 1] = c_upd_single
+        elif bdlo5:
             # 1a) Child1 ↔ parent (mass-blended via _numba_coupling_core)
             ci_c1 = np.array([ci_np[0]], dtype=np.int64)
             cms_c1 = cms_np[0:1]

@@ -63,6 +63,7 @@ def load_mocap_config(kinova_id, franka_id):
         data = pickle.load(f)
     # data shape: (1, 3, 18)
     pts = np.array(data).squeeze().T  # (18, 3)
+    pts[:, 0] = -pts[:, 0]   # flip x to match the DEFT BDLO5 frame
     return pts
 
 
@@ -147,9 +148,13 @@ def setup_deft_sim(parent_clamped_selection, load_checkpoint=None):
     child1_vertices = undeformed_BDLO[:, N_PARENT:N_PARENT + N_CHILD1 - 1]
     child2_vertices = undeformed_BDLO[:, N_PARENT + N_CHILD1 - 1:]
 
+    # Match visualizations/predict_bdlo5_biased.py and scripts/DEFT_train.py:
+    # treat the parent rod as effectively infinite mass/MOI so the children
+    # absorb all attachment-coupling correction (parent_mass_scale=1e6,
+    # parent_moment_scale=1e6).
     b_DLO_mass, parent_MOI, children_MOI, _, _, _ = DEFT_initialization(
         parent_vertices, child1_vertices, child2_vertices, N_BRANCH, N_PARENT,
-        (N_CHILD1, N_CHILD2), COUPLING_INDEX, 1.0, 10.0, (0.5, 0.5), (1, 1), 0.1,
+        (N_CHILD1, N_CHILD2), COUPLING_INDEX, 1e6, 1e6, (0.5, 0.5), (1, 1), 0.1,
         bdlo5=True
     )
 
@@ -199,6 +204,19 @@ def setup_deft_sim(parent_clamped_selection, load_checkpoint=None):
         use_orientation_constraints=True, use_attachment_constraints=True,
         bdlo5=True
     )
+
+    # Mirror the inference (predict_bdlo5_biased.py) and training setup: c1
+    # absorbs ~0 of the c2 attachment correction and c2 absorbs ~all, for both
+    # position (mass) and rotation (MOI / momentum) coupling.
+    deft_sim.child2_coupling_mass_scale = torch.tensor(
+        [[[[0., 0., 0.], [0., 0., 0.], [0., 0., 0.]],
+          [[-1., 0., 0.], [0., -1., 0.], [0., 0., -1.]]]],
+        dtype=torch.float64,
+    )
+    _extreme_c2_momentum = torch.zeros(batch, 2, 3, 3, dtype=torch.float64)
+    _extreme_c2_momentum[:, 1] = torch.eye(3, dtype=torch.float64)
+    deft_sim.child2_momentum_scale_previous = _extreme_c2_momentum
+    deft_sim.child2_momentum_scale_next = _extreme_c2_momentum.clone()
 
     if load_checkpoint:
         checkpoint = torch.load(load_checkpoint, map_location=device)
@@ -623,6 +641,7 @@ def run_child_branch_insertion(kinova_id, franka_id, target_id, checkpoint_path=
     flat_pts = load_mocap_config(kinova_id, franka_id)  # (18, 3)
     hole_pts = load_hole(target_id)                     # (4, 3)
     hole_pts[:, 0] += 0.09  # shift hole 9cm toward x positive
+    hole_pts[:, 0] = -hole_pts[:, 0]  # flip x AFTER the shift to match the DEFT BDLO5 frame
 
     # Compute hole center & normal oriented toward the child2 tip
     # In flat format, tip is vertex 17
@@ -657,55 +676,30 @@ def run_child_branch_insertion(kinova_id, franka_id, target_id, checkpoint_path=
         parent_clamped_selection, load_checkpoint=checkpoint_path
     )
 
-    # ===== WARMUP =====
-    settled_state = _run_warmup(
-        deft_sim, initial_branched, parent_theta_clamp,
-        child1_theta_clamp, child2_theta_clamp, parent_clamped_selection
+    # Stage 1 starts directly from the raw mocap state (no warmup).
+    settled_state = initial_branched
+
+    # ===== STAGE 1: Align =====
+    print(f"\n{'='*60}")
+    print(f"  STAGE 1: ALIGN (child2 tip -> {align_distance}m in front of hole)")
+    print(f"{'='*60}")
+    sol1, info1, traj1, state_after_align, time1 = _run_single_stage(
+        deft_sim, settled_state, parent_theta_clamp,
+        child1_theta_clamp, child2_theta_clamp, target_align,
+        parent_clamped_selection, "Stage1-Align", run_grad_check=False,
+        hole_pts=hole_pts, out_dir=out_dir
     )
 
-    # ===== SKIP STAGE 1: Use known alignment solution =====
-    stage1_abs = np.array([0.32956084, -0.32656688, 0.60857685])
-    initial_v0 = settled_state[0, 0, parent_clamped_selection[0]].numpy()
-    stage1_disp = stage1_abs - initial_v0
-    print(f"\n{'='*60}")
-    print(f"  SKIPPING STAGE 1: Using known solution")
-    print(f"  v0 initial: {initial_v0}")
-    print(f"  v0 target:  {stage1_abs}")
-    print(f"  displacement: {stage1_disp}")
-    print(f"{'='*60}")
-
-    # Run sim with Stage 1 displacement to get the aligned state
-    disp_t = torch.from_numpy(stage1_disp).double()
-    # Build clamped trajectory manually
-    zero = torch.zeros(3, dtype=torch.float64)
-    final_disps = torch.stack([disp_t, disp_t, zero, zero])  # (4, 3)
-    initial_clamped = settled_state[0, 0, parent_clamped_selection].detach().clone()
-    batch = 1
-    clamped_full = torch.zeros(batch, SIM_TIME_HORIZON, N_BRANCH, N_PARENT, 3, dtype=torch.float64)
-    for t in range(SIM_TIME_HORIZON):
-        alpha = t / max(SIM_TIME_HORIZON - 1, 1)
-        interpolated = initial_clamped + alpha * final_disps
-        for i, idx in enumerate(parent_clamped_selection):
-            clamped_full[0, t, 0, idx] = interpolated[i]
-
-    with torch.no_grad():
-        b_current = settled_state.unsqueeze(1)
-        b_previous = settled_state.unsqueeze(1)
-        traj1, _ = deft_sim.iterative_predict(
-            time_horizon=SIM_TIME_HORIZON,
-            b_DLOs_vertices_traj=b_current,
-            previous_b_DLOs_vertices_traj=b_previous,
-            clamped_positions=clamped_full,
-            dt=0.01,
-            parent_theta_clamp=parent_theta_clamp,
-            child1_theta_clamp=child1_theta_clamp,
-            child2_theta_clamp=child2_theta_clamp,
-            inference_1_batch=False
-        )
-
     tip_after_align = traj1[0, -1, TIP_BRANCH, TIP_VERTEX].numpy()
-    print(f"Child2 tip after Stage 1 replay: {tip_after_align}")
-    initial_for_insert = traj1[:, -1].detach()  # (1, n_branch, max_vert, 3)
+    align_dist = np.linalg.norm(tip_after_align - target_align)
+    print(f"\n{'='*60}")
+    print(f"  STAGE 1 RESULT (align)")
+    print(f"{'='*60}")
+    print(f"Final child2 tip position: {tip_after_align}")
+    print(f"Final tip-to-align-target distance: {align_dist:.6f}")
+    print(f"Optimization time: {time1:.2f}s")
+
+    initial_for_insert = state_after_align  # (1, n_branch, max_vert, 3)
 
     # ===== STAGE 2: Insert =====
     print(f"\n{'='*60}")
@@ -714,7 +708,7 @@ def run_child_branch_insertion(kinova_id, franka_id, target_id, checkpoint_path=
     sol2, info2, traj2, state_after_insert, time2 = _run_single_stage(
         deft_sim, initial_for_insert, parent_theta_clamp,
         child1_theta_clamp, child2_theta_clamp, target_insert,
-        parent_clamped_selection, "Stage2-Insert", run_grad_check=True,
+        parent_clamped_selection, "Stage2-Insert", run_grad_check=False,
         hole_pts=hole_pts, out_dir=out_dir
     )
 
@@ -881,13 +875,49 @@ if __name__ == "__main__":
     parser.add_argument('--kinova', type=int, default=1, help='Kinova config ID (1-4)')
     parser.add_argument('--franka', type=int, default=1, help='Franka config ID (1-5)')
     parser.add_argument('--target', type=int, default=1, help='Target hole ID (1-2)')
-    parser.add_argument('--checkpoint', type=str,
-                        default=os.path.join(os.path.dirname(__file__), '..', 'save_model', 'BDLO5', 'DEFT_ends_5_pretrained_wo_residual.pth'),
-                        help='Model checkpoint path')
+    parser.add_argument('--checkpoint', type=str, default='',
+                        help='Model checkpoint path (empty = no checkpoint, pure physics)')
     parser.add_argument('--offset', type=float, default=0.025, help='Target offset behind hole (stage 2)')
     parser.add_argument('--align', type=float, default=0.025, help='Alignment distance in front of hole (stage 1)')
     parser.add_argument('--vis-only', action='store_true', help='Only visualize initial shape, no optimization')
+    parser.add_argument('--undeform-only', action='store_true',
+                        help='Only visualize the undeformed BDLO5 reference pose, no data load or optimization')
     args = parser.parse_args()
+
+    if args.undeform_only:
+        torch.set_default_dtype(torch.float64)
+        # Build the sim purely to grab the rest pose after the BDLO5 coord
+        # transform. We don't need any of the loaded data.
+        deft_sim, _, _, _ = setup_deft_sim(
+            torch.tensor((0, 1, -2, -1)), load_checkpoint=None
+        )
+        undeformed = deft_sim.undeformed_vert.detach().cpu().numpy()  # (n_branch, n_vert, 3)
+        fig = plt.figure(figsize=(8, 6))
+        ax = fig.add_subplot(111, projection='3d')
+        branch_colors = ['red', 'blue', 'green']
+        branch_labels = ['Parent', 'Child1', 'Child2']
+        branch_nv = [N_PARENT, N_CHILD1, N_CHILD2]
+        for bi in range(N_BRANCH):
+            v = undeformed[bi, :branch_nv[bi]]
+            ax.plot(v[:, 0], v[:, 1], v[:, 2], 'o-', color=branch_colors[bi],
+                    linewidth=2, markersize=5, label=branch_labels[bi])
+        # Mark child2 tip
+        ax.scatter(*undeformed[TIP_BRANCH, TIP_VERTEX], color='magenta', s=120,
+                   marker='D', edgecolors='black', zorder=5, label='child2 tip')
+        all_pts = np.concatenate([undeformed[bi, :branch_nv[bi]] for bi in range(N_BRANCH)], axis=0)
+        mid = (all_pts.max(0) + all_pts.min(0)) / 2
+        half = (all_pts.max(0) - all_pts.min(0)).max() / 2 * 1.1
+        ax.set_xlim(mid[0] - half, mid[0] + half)
+        ax.set_ylim(mid[1] - half, mid[1] + half)
+        ax.set_zlim(mid[2] - half, mid[2] + half)
+        ax.set_box_aspect([1, 1, 1])
+        ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
+        ax.set_title('BDLO5 Undeformed reference (post coord transform)')
+        ax.legend(fontsize=8)
+        ax.view_init(elev=20, azim=-60)
+        print("Showing undeformed BDLO5 — close the window to exit.")
+        plt.show()
+        sys.exit(0)
 
     if args.vis_only:
         torch.set_default_dtype(torch.float64)
@@ -897,6 +927,7 @@ if __name__ == "__main__":
         flat_pts = load_mocap_config(args.kinova, args.franka)
         hole_pts = load_hole(args.target)
         hole_pts[:, 0] += 0.09  # shift hole 9cm toward x positive
+        hole_pts[:, 0] = -hole_pts[:, 0]  # flip x AFTER the shift to match the DEFT BDLO5 frame
         initial_branched = mocap_to_branched_tensor(flat_pts)
 
         tip_position = flat_pts[17]
@@ -924,7 +955,7 @@ if __name__ == "__main__":
         target_id=args.target,
         checkpoint_path=args.checkpoint,
         offset_distance=args.offset,
-        align_distance=args.align
+        align_distance=args.align,
     )
     optimized_traj, initial_branched, target_pt, hole_pts, flat_pts, solution, info = result
 
