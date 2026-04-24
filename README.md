@@ -49,8 +49,8 @@ git clone https://github.com/roahmlab/DEFT.git
 cd DEFT
 conda env create -f environment.yml
 conda activate DEFT
-pip install -e .
 ```
+The training/eval scripts add the repo root to `sys.path` themselves, so no `pip install -e .` step is needed.
 
 ## Project Structure
 ```
@@ -61,7 +61,6 @@ DEFT/
 │   ├── solvers/            # Constraint and theta solvers
 │   └── utils/              # Utility functions
 ├── scripts/                # Training and analysis scripts
-├── tests/                  # Thread-insertion planning and ablation scripts
 ├── assets/                 # Images and media
 ├── dataset/                # Training and evaluation data
 ├── save_model/             # Saved model checkpoints
@@ -71,15 +70,19 @@ DEFT/
 ## Train DEFT Models
 The training entry point is `scripts/DEFT_train.py`. All arguments are keyword-only (parsed via `argparse`) and booleans expect the literal strings `true` / `false`.
 
+**Run from the `scripts/` directory** — all dataset / checkpoint / log paths are relative to it (`../dataset/...`, `../save_model/...`, `../training_record/...`).
+
 ### Quick start
 Train the physics-only BDLO1 model with end-grasping (default config):
 ```bash
-python scripts/DEFT_train.py --BDLO_type 1 --clamp_type ends
+cd scripts
+python3 DEFT_train.py --BDLO_type 1 --clamp_type ends
 ```
 
 Load the released pretrained full model and fine-tune only the GNN residual (physics frozen):
 ```bash
-python scripts/DEFT_train.py --BDLO_type 5 --load_model true --training_mode residual --residual_learning true
+cd scripts
+python3 DEFT_train.py --BDLO_type 5 --load_model true --training_mode residual --residual_learning true
 ```
 
 ### Arguments

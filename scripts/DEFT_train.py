@@ -343,8 +343,6 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         # to equal its parent attachment vertex (the dataset's raw c[0] is
         # discarded). Both the undeformed pose and the trajectory loaders go
         # through the same `_bdlo6_split_and_pad` helper so they always match.
-        from deft.utils.util import load_bdlo6_undeformed
-
         # Assembled per-branch vertex counts (after prepending parent[attach]
         # to each child, BDLO1–5-style). The dataset's raw stored counts are
         # (4, 2, 3) for c1/c2/c3; assembled counts are (5, 3, 4).
@@ -354,10 +352,69 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         n_child3_vertices = 4
         n_branch_local    = 4   # parent + 3 children (don't override outer n_branch=3 used elsewhere)
 
-        # `load_bdlo6_undeformed` applies the same coord-transform pipeline
-        # (stage 1: BDLO5 swap + Rx(+90°), stage 2: Rx(-90°), stage 3: negate X)
-        # as the dataset loaders, then assembles the 4-branch padded layout.
-        b_undeformed_vert_bdlo6 = load_bdlo6_undeformed('../dataset/BDLO6_undeformed.pkl')
+        # Hardcoded BDLO6 undeformed pose, `[4, 12, 3]` padded layout — matches
+        # the BDLO1–5 style. Each branch's real vertex count is given by
+        # (n_parent_vertices, n_child1_vertices, n_child2_vertices, n_child3_vertices);
+        # the remaining slots are zero-padded. Each child's vertex 0 equals its
+        # parent attachment vertex.
+        b_undeformed_vert_bdlo6 = torch.tensor([
+            [  # branch 0: parent (12 vertices)
+                [-0.187119, 0.021395, 0.133264],
+                [-0.172018, 0.009445, 0.112632],
+                [-0.113295, 0.003033, 0.058356],
+                [-0.049662, 0.008792, 0.011350],
+                [0.017953, 0.010332, -0.033777],
+                [0.098992, 0.000464, -0.070898],
+                [0.190208, -0.001189, -0.036287],
+                [0.277958, -0.002056, -0.007805],
+                [0.389675, -0.000566, 0.007162],
+                [0.466612, -0.003182, 0.064183],
+                [0.501926, -0.003284, 0.153374],
+                [0.510967, -0.003892, 0.183443],
+            ],
+            [  # branch 1: child1 (5 vertices, rest padding)
+                [-0.113295, 0.003033, 0.058356],
+                [-0.138124, 0.000775, -0.027088],
+                [-0.119536, 0.001702, -0.119890],
+                [-0.067660, -0.000630, -0.144435],
+                [-0.041186, -0.000081, -0.144260],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+            ],
+            [  # branch 2: child2 (3 vertices, rest padding)
+                [0.277958, -0.002056, -0.007805],
+                [0.314104, -0.002918, 0.051266],
+                [0.330484, -0.003654, 0.066860],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+            ],
+            [  # branch 3: child3 (4 vertices, rest padding)
+                [0.277958, -0.002056, -0.007805],
+                [0.341094, -0.003905, -0.042231],
+                [0.407847, -0.000331, -0.064062],
+                [0.432073, 0.004424, -0.072002],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+                [0.000000, 0.000000, 0.000000],
+            ],
+        ], dtype=torch.float64)
 
         if undeform_vis:
             branch_colors = ['red', 'green', 'blue', 'magenta']
@@ -561,7 +618,7 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
 
         # ---- Load pretrained checkpoint if requested ----
         if load_model:
-            pretrained_path = "../save_model/BDLO6/DEFT_ends_6_pretrained_full_model.pth"
+            pretrained_path = "../save_model/BDLO6/DEFT_ends_6_pretrained_wo_residual.pth"
             if os.path.exists(pretrained_path):
                 pretrained_dict = torch.load(pretrained_path)
                 pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'adjacency_batch' not in k}

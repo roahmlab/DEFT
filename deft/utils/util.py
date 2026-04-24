@@ -1284,27 +1284,6 @@ _BDLO6_N_BRANCH     = 4
 BDLO6_RIGID_BODY_COUPLING_INDEX = (2, 7, 7)
 
 
-def apply_bdlo6_transform_undeformed(verts):
-    """
-    BDLO6 *undeformed-pose* coordinate transform. The undeformed pkl is in a
-    different raw frame than the trajectory pkls, so it needs a different
-    composed transform. Mirrors the staged transform used in
-    `scripts/DEFT_train.py`'s BDLO6 block:
-        stage 1: BDLO5 swap (x↔z) + Rx(+90°)  → (x, y, z) → (z, -x,  y)
-        stage 2: Rx(-90°)                       → (x, y, z) → (x,  z, -y)
-        stage 3: negate X                       → (x, y, z) → (-x, y,  z)
-        composed                                → (x, y, z) → (-z, y,  x)
-
-    `verts` is any torch.Tensor with shape `[..., 3]`. Only the last axis is
-    permuted; the rest of the shape is preserved. Returns a new tensor.
-    """
-    out = torch.zeros_like(verts)
-    out[..., 0] = -verts[..., 2]
-    out[..., 1] =  verts[..., 1]
-    out[..., 2] =  verts[..., 0]
-    return out
-
-
 def apply_bdlo6_transform_trajectory(verts):
     """
     BDLO6 *trajectory* coordinate transform — only stage 1 of the BDLO6
@@ -1364,18 +1343,6 @@ def _bdlo6_split_and_pad(verts):
     if not is_time:
         out = out.squeeze(0)                    # [4, 12, 3]
     return out
-
-
-def load_bdlo6_undeformed(pkl_path):
-    """
-    Load the BDLO6 undeformed reference pose from a pickle file containing a
-    `(3, 21)` array (xyz × n_vertices), apply the *undeformed* coord transform,
-    and return a `[4, 12, 3]` padded layout.
-    """
-    arr = pd.read_pickle(pkl_path)              # tuple/ndarray, shape (3, 21)
-    verts = torch.tensor(np.array(arr)).permute(1, 0)   # [21, 3]
-    verts = apply_bdlo6_transform_undeformed(verts)
-    return _bdlo6_split_and_pad(verts)          # [4, 12, 3]
 
 
 def _load_bdlo6_trajectory_pkl(pkl_path, total_time):
