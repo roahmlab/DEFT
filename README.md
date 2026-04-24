@@ -82,7 +82,7 @@ python3 DEFT_train.py --BDLO_type 1 --clamp_type ends
 Load the released pretrained full model and fine-tune only the GNN residual (physics frozen):
 ```bash
 cd scripts
-python3 DEFT_train.py --BDLO_type 5 --load_model true --training_mode residual --residual_learning true
+python3 DEFT_train.py --BDLO_type 1 --load_model true --training_mode residual --residual_learning true
 ```
 
 ### Arguments
