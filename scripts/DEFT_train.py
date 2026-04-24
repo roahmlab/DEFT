@@ -318,9 +318,6 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
 
         rigid_body_coupling_index = [5, 1]
 
-        # Match visualizations/predict_bdlo5_biased.py: treat the parent rod as
-        # effectively infinite mass/MOI relative to the children so that c1 (and
-        # transitively c2) absorbs all attachment-coupling correction.
         parent_mass_scale = 1e6
         parent_moment_scale = 1e6
         moment_ratio = 0.1
@@ -457,8 +454,8 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         child1_clamped_selection = torch.tensor((2,))
         child2_clamped_selection = torch.tensor((2,))
 
-        parent_mass_scale     = 1.
-        parent_moment_scale   = 10.
+        parent_mass_scale     = 1e6
+        parent_moment_scale   = 1e6
         moment_ratio          = 0.1
         children_moment_scale = (0.5, 0.5, 0.5)
         children_mass_scale   = (1, 1, 1)
@@ -556,6 +553,11 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
                                eval_bend_stiffness_parent, eval_bend_stiffness_child1,
                                eval_bend_stiffness_child2, eval_bend_stiffness_child3,
                                eval_twist_stiffness, eval_damping, eval_learning_weight)
+
+        # BDLO6 per-child coplanar projection (off by default in DEFT_sim).
+        # Flip these to True to turn it on for both train and eval sims.
+        sim_train._bdlo6_use_coplanar = True
+        sim_eval._bdlo6_use_coplanar = True
 
         # ---- Load pretrained checkpoint if requested ----
         if load_model:
@@ -877,33 +879,27 @@ def train(train_batch, BDLO_type, total_time, train_time_horizon, undeform_vis, 
         use_attachment_constraints=use_attachment_constraints,
         bdlo5=bdlo5
     )
-
-    # For BDLO5, override both the c2↔c1 coupling mass scale and the c2↔c1
-    # rotation (momentum) scale so c1 is treated as effectively infinite-mass
-    # and infinite-MOI: c1 absorbs ~0 of the position/rotation correction at
-    # the c2 attachment and c2 absorbs ~all of it. Mirrors the inference setup
-    # in visualizations/predict_bdlo5_biased.py so training and inference see
-    # consistent attachment physics.
+    
     if BDLO_type == 5:
-        _extreme_c2_coupling = torch.tensor(
+        _c2_coupling_scale = torch.tensor(
             [[[[0., 0., 0.], [0., 0., 0.], [0., 0., 0.]],
               [[-1., 0., 0.], [0., -1., 0.], [0., 0., -1.]]]],
             dtype=torch.float64,
         )
-        DEFT_sim_train.child2_coupling_mass_scale = _extreme_c2_coupling
-        DEFT_sim_eval.child2_coupling_mass_scale = _extreme_c2_coupling.clone()
+        DEFT_sim_train.child2_coupling_mass_scale = _c2_coupling_scale
+        DEFT_sim_eval.child2_coupling_mass_scale = _c2_coupling_scale.clone()
 
-        def _make_extreme_c2_momentum(batch_):
+        def _make_c2_momentum_scale(batch_):
             # Shape (batch, 2, 3, 3). Slot [:, 0] is the c1-side correction
             # (zeroed), slot [:, 1] is the c2-side correction (identity).
             m = torch.zeros(batch_, 2, 3, 3, dtype=torch.float64)
             m[:, 1] = torch.eye(3, dtype=torch.float64)
             return m
 
-        DEFT_sim_train.child2_momentum_scale_previous = _make_extreme_c2_momentum(train_batch)
-        DEFT_sim_train.child2_momentum_scale_next     = _make_extreme_c2_momentum(train_batch)
-        DEFT_sim_eval.child2_momentum_scale_previous  = _make_extreme_c2_momentum(eval_batch)
-        DEFT_sim_eval.child2_momentum_scale_next      = _make_extreme_c2_momentum(eval_batch)
+        DEFT_sim_train.child2_momentum_scale_previous = _make_c2_momentum_scale(train_batch)
+        DEFT_sim_train.child2_momentum_scale_next     = _make_c2_momentum_scale(train_batch)
+        DEFT_sim_eval.child2_momentum_scale_previous  = _make_c2_momentum_scale(eval_batch)
+        DEFT_sim_eval.child2_momentum_scale_next      = _make_c2_momentum_scale(eval_batch)
 
     # Load pretrained models for initialization depending on BDLO_type and clamp_type
     # Always loads full model (physics + GNN) when available

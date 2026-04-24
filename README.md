@@ -4,7 +4,7 @@ This repository contains the source code for the paper [DEFT: Differentiable Bra
 
 ## Introduction
 <p align="center">
-  <img height="295" width=1200" src="/demo_image.png"/>
+  <img height="295" width="1200" src="assets/demo_image.png"/>
 </p>
 
 The figures above illustrate how DEFT can be used to autonomously perform a wire insertion task.
@@ -21,10 +21,10 @@ All authors are affiliated with the Robotics department and the department of Me
 
 ## Modeling Results Visualization
 <p align="center">
-  <img height="530" width=1200" src="/modeling_demo.png"/>
+  <img height="530" width="1200" src="assets/modeling_demo.png"/>
 </p>
 <p align="center">
-  <img height="530" width=1200" src="/modeling_demo2.png"/>
+  <img height="530" width="1200" src="assets/modeling_demo2.png"/>
 </p>
 Visualization of the predicted trajectories for BDLO 1 under two manipulation scenarios, using DEFT, a DEFT ablation that leaves out the constraint described in Theorem 4, and Tree-LSTM. The ground-truth initial position of the vertices are colored in blue, the ground-truth final position of the vertices are colored in pink, and the gradient between these two colors is used to denote the ground truth location over time. 
 The predicted vertices are colored as green circles (DEFT), orange circles (DEFT ablation), and light red circles (Tree-LSTM), respectively.
@@ -33,11 +33,6 @@ Note that the ground truth is only provided at t=0s and prediction is constructe
 The prediction is performed recursively, without requiring additional ground-truth data or perception inputs throughout the entire process.
 
 ## Dependencies
-The main dependencies are listed in `requirements.txt`. Install them using:
-```bash
-pip install -r requirements.txt
-```
-
 Key dependencies include:
 - PyTorch (2.5.1+)
 - NumPy
@@ -48,9 +43,7 @@ Key dependencies include:
 - Pandas
 
 ## Installation
-
-### Using Conda Environment (Recommended)
-The easiest way to set up the environment is using the provided conda environment file:
+Install via the provided conda environment file:
 ```bash
 git clone https://github.com/roahmlab/DEFT.git
 cd DEFT
@@ -59,26 +52,16 @@ conda activate DEFT
 pip install -e .
 ```
 
-### From Source (Alternative)
-```bash
-git clone https://github.com/roahmlab/DEFT.git
-cd DEFT
-pip install -r requirements.txt
-pip install -e .
-```
-
 ## Project Structure
 ```
 DEFT/
-├── deft/                    # Main package
+├── deft/                   # Main package
 │   ├── core/               # Core simulation modules
 │   ├── models/             # Neural network models
 │   ├── solvers/            # Constraint and theta solvers
 │   └── utils/              # Utility functions
 ├── scripts/                # Training and analysis scripts
-├── examples/               # Example usage and demos
-├── tests/                  # Unit tests
-├── docs/                   # Documentation
+├── tests/                  # Thread-insertion planning and ablation scripts
 ├── assets/                 # Images and media
 ├── dataset/                # Training and evaluation data
 ├── save_model/             # Saved model checkpoints
@@ -86,10 +69,36 @@ DEFT/
 ```
 
 ## Train DEFT Models
-Example: To train a DEFT model using the BDLO1 dataset with end-effectors that grasp the BDLO's ends, run the following command:
+The training entry point is `scripts/DEFT_train.py`. All arguments are keyword-only (parsed via `argparse`) and booleans expect the literal strings `true` / `false`.
+
+### Quick start
+Train the physics-only BDLO1 model with end-grasping (default config):
 ```bash
-python scripts/DEFT_train.py --BDLO_type="1" --clamp_type="ends"
+python scripts/DEFT_train.py --BDLO_type 1 --clamp_type ends
 ```
+
+Load the released pretrained full model and fine-tune only the GNN residual (physics frozen):
+```bash
+python scripts/DEFT_train.py --BDLO_type 5 --load_model true --training_mode residual --residual_learning true
+```
+
+### Arguments
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--BDLO_type` | int (1–6) | 1 | Which BDLO dataset/topology to train on. |
+| `--clamp_type` | `ends` / `middle` | `ends` | End-grasping vs. mid-grasping. `middle` is only available for BDLO 1 and 3. |
+| `--training_mode` | `physics` / `residual` / `full` | `physics` | `physics` trains only material parameters; `residual` trains only the GNN residual with physics frozen (requires `--load_model true`); `full` trains both jointly. |
+| `--residual_learning` | bool | `false` | Enable the GNN residual term (sets a non-zero learning weight). Pair with `--training_mode residual` or `full`. |
+| `--load_model` | bool | `false` | Load the pretrained full checkpoint for the selected BDLO/clamp combo from `save_model/`. Required for `residual` / `full` training modes. |
+| `--train_batch` | int | 32 | Training batch size. |
+| `--total_time` | int | 500 | Total timesteps per dataset pkl. |
+| `--train_time_horizon` | int | 50 | Number of timesteps simulated per training iteration. |
+| `--use_orientation_constraints` | bool | `true` | Enable the junction orientation constraint (also gates the coplanar projection). Turn off for ablation. |
+| `--use_attachment_constraints` | bool | `true` | Enable the parent↔child attachment constraint. Turn off for ablation. |
+| `--inference_1_batch` | bool | `false` | Use the numba single-batch inference path during eval. Faster; produces numerically identical results to the torch path. |
+| `--inference_vis` | bool | `false` | Visualize eval rollouts during training (for debugging). |
+| `--undeform_vis` | bool | `false` | Visualize the undeformed reference pose only, then exit. |
 
 ## Dataset
 - For each BDLO, dynamic trajectory data is captured in real-world settings using a motion capture system operating at 100 Hz when robots grasp the BDLO’s ends. For details on dataset usage, please refer to DEFT_train.py.

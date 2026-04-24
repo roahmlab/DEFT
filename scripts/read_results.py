@@ -9,16 +9,17 @@ clamp_type = "ends"
 # model = "GCN"
 model = "DEFT"
 training_case = 1
-BDLO_type = 5
+BDLO_type = 6
 eval_loss_1 = np.array(pd.read_pickle(r"../training_record/eval_%s_loss_%s_%s_%s.pkl" % (clamp_type, model, training_case, BDLO_type)))
 eval_step_1 = np.array(pd.read_pickle(r"../training_record/eval_%s_epoches_%s_%s_%s.pkl" % (clamp_type,  model, training_case, BDLO_type)))
-print(np.sqrt(eval_loss_1))
-print("loss minimum: ", np.min(np.sqrt(eval_loss_1)))
+eval_loss_plot = eval_loss_1 if BDLO_type == 6 else np.sqrt(eval_loss_1)
+print(eval_loss_plot)
+print("loss minimum: ", np.min(eval_loss_plot))
 fig, (ax1, ax2) = plt.subplots(1, 2)
 fig.set_figheight(10)
 fig.set_figwidth(20)
 
-line1 = ax2.plot(eval_step_1, np.sqrt(eval_loss_1), label='%s'%BDLO_type)
+line1 = ax2.plot(eval_step_1, eval_loss_plot, label='%s'%BDLO_type)
 
 # # # #
 ax1.set_title('BDLO1: Training')

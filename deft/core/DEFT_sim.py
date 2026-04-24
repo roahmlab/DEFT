@@ -778,6 +778,30 @@ class DEFT_sim(nn.Module):
 
         return forces
 
+    def _coplanar_parent_edges(self, parent_xyz, idx):
+        """Return (e_back, e_fwd) parent edges around junction `idx`.
+
+        Default (narrow stencil): adjacent edges
+            e_back = parent[idx]   - parent[idx-1]
+            e_fwd  = parent[idx+1] - parent[idx]
+        Wide stencil (set sim._coplanar_wide_stencil=True): 2-edge span on
+        each side, more robust to locally-straight parent geometry — the
+        plane normal `cross(e_back, e_fwd)` is averaged over a longer parent
+        section instead of two near-parallel adjacent edges.
+
+        `parent_xyz` may be either (n_vert, 3) or (batch, n_vert, 3) — the
+        ellipsis indexing handles both. `idx` is clamped against [0, n_vert-1].
+        """
+        if getattr(self, '_coplanar_wide_stencil', False):
+            back = max(0, idx - 2)
+            fwd = min(self.n_vert - 1, idx + 2)
+        else:
+            back = idx - 1
+            fwd = idx + 1
+        e_back = parent_xyz[..., idx, :] - parent_xyz[..., back, :]
+        e_fwd = parent_xyz[..., fwd, :] - parent_xyz[..., idx, :]
+        return e_back, e_fwd
+
     def Numerical_Integration(
         self,
         mass_matrix,
@@ -1014,6 +1038,23 @@ class DEFT_sim(nn.Module):
                 _pn2 = _pn2 / (_pn2.norm() + 1e-10)
                 _ec2 = _init_c2v[1] - _init_c2v[0]
                 self._c2_oop_ratio = (_ec2 * _pn2).sum().unsqueeze(0).unsqueeze(0) / _ec2.norm().unsqueeze(0).unsqueeze(0)
+
+        if self.bdlo6:
+            # Per-child OOP ratio relative to the parent bending plane at each
+            # child's attachment point. Mirrors the BDLO5 c1 coplanar setup.
+            _init_verts = b_DLOs_vertices_traj[:, 0].reshape(-1, self.n_vert, 3)
+            _init_pv = _init_verts[self.selected_parent_index[0]]
+            self._bdlo6_oop_ratios = []
+            n_children_b6 = len(self.rigid_body_coupling_index)
+            for c_i in range(n_children_b6):
+                _p_idx = self.rigid_body_coupling_index[c_i]
+                _ep1, _ep2 = self._coplanar_parent_edges(_init_pv, _p_idx)
+                _pn = torch.cross(_ep1, _ep2, dim=-1)
+                _pn = _pn / (_pn.norm() + 1e-10)
+                _init_cv = _init_verts[self.selected_children_index[c_i]]
+                _ec = _init_cv[1] - _init_cv[0]
+                _ratio = (_ec * _pn).sum().unsqueeze(0).unsqueeze(0) / _ec.norm().unsqueeze(0).unsqueeze(0)
+                self._bdlo6_oop_ratios.append(_ratio)
 
         # Main loop over timesteps
         for ith in range(time_horizon):
@@ -1282,7 +1323,7 @@ class DEFT_sim(nn.Module):
                             e_p2 = pv_t[:, c1_idx + 1] - pv_t[:, c1_idx]
                             pn = torch.cross(e_p1, e_p2, dim=-1)
                             pn_norm = pn.norm(dim=-1, keepdim=True)
-                            if pn_norm.min() > 1e-6:
+                            if pn_norm.min() > 5e-4:
                                 pn = pn / pn_norm
                                 e_c = child1_verts[:, 1] - child1_verts[:, 0]
                                 e_c_len = e_c.norm(dim=-1, keepdim=True)
@@ -1335,7 +1376,7 @@ class DEFT_sim(nn.Module):
                                 e_c1_dir = c1_as_parent[:, 1] - c1_as_parent[:, 0]
                                 pn2 = torch.cross(e_par_dir, e_c1_dir, dim=-1)
                                 pn2_norm = pn2.norm(dim=-1, keepdim=True)
-                                if pn2_norm.min() > 1e-6:
+                                if pn2_norm.min() > 5e-4:
                                     pn2 = pn2 / pn2_norm
                                     e_c2 = child2_verts[:, 1] - child2_verts[:, 0]
                                     e_c2_len = e_c2.norm(dim=-1, keepdim=True)
@@ -1381,6 +1422,37 @@ class DEFT_sim(nn.Module):
                             n_children_b6 = len(self.rigid_body_coupling_index)
                             prev_children_local = [prev_cv_t[:, c_i].clone() for c_i in range(n_children_b6)]
 
+                            # Pre-track parent_q once per unique edge using the true
+                            # start-of-iteration prev_pv*. Without this, children that
+                            # share an attachment vertex never see their parent edge
+                            # rotation accumulated (the first child to touch the idx
+                            # overwrites prev_pv*, and subsequent children compute a
+                            # tracking rotation of ~identity relative to a stale prev).
+                            _edge1_idx_set = set(self.rigid_body_coupling_index[_c] - 1 for _c in range(n_children_b6))
+                            _edge2_idx_set = set(self.rigid_body_coupling_index[_c] for _c in range(n_children_b6))
+                            for _idx in _edge1_idx_set:
+                                _prev_edge = prev_pv1_t[:, _idx + 1] - prev_pv1_t[:, _idx]
+                                _curr_edge = pv_t[:, _idx + 1] - pv_t[:, _idx]
+                                _track_rot_mat = self.constraints_enforcement.rotation_matrix_from_vectors(
+                                    _prev_edge.unsqueeze(1), _curr_edge.unsqueeze(1)).squeeze(1)
+                                _track_rot_q = pytorch3d.transforms.rotation_conversions.matrix_to_quaternion(_track_rot_mat)
+                                _new_q = pytorch3d.transforms.quaternion_multiply(_track_rot_q, pro_t[:, _idx])
+                                pro_t = torch.cat([pro_t[:, :_idx], _new_q.unsqueeze(1), pro_t[:, _idx + 1:]], dim=1)
+                            for _idx in _edge2_idx_set:
+                                if _idx in _edge1_idx_set:
+                                    continue
+                                _prev_edge = prev_pv2_t[:, _idx + 1] - prev_pv2_t[:, _idx]
+                                _curr_edge = pv_t[:, _idx + 1] - pv_t[:, _idx]
+                                _track_rot_mat = self.constraints_enforcement.rotation_matrix_from_vectors(
+                                    _prev_edge.unsqueeze(1), _curr_edge.unsqueeze(1)).squeeze(1)
+                                _track_rot_q = pytorch3d.transforms.rotation_conversions.matrix_to_quaternion(_track_rot_mat)
+                                _new_q = pytorch3d.transforms.quaternion_multiply(_track_rot_q, pro_t[:, _idx])
+                                pro_t = torch.cat([pro_t[:, :_idx], _new_q.unsqueeze(1), pro_t[:, _idx + 1:]], dim=1)
+                            # Freeze prev_pv*_t to current pv_t so the solver's internal
+                            # tracking for each per-child call is identity (no double-tracking).
+                            prev_pv1_t = pv_t.clone()
+                            prev_pv2_t = pv_t.clone()
+
                             for c_i in range(n_children_b6):
                                 p_idx = self.rigid_body_coupling_index[c_i]
                                 child_verts_local = cv_t[:, c_i]
@@ -1406,6 +1478,46 @@ class DEFT_sim(nn.Module):
                                 cro_t = torch.cat([cro_t[:, :c_i], _new_c_orient.unsqueeze(1), cro_t[:, c_i + 1:]], dim=1)
                                 prev_pv2_t = pv_t.clone()
                                 prev_children_local[c_i] = child_verts_local.clone()
+
+                                # Coplanarity for child c_i (off by default;
+                                # set sim._bdlo6_use_coplanar = True to enable).
+                                # Corrects the out-of-plane component relative
+                                # to the parent bending plane at p_idx, with
+                                # the GT-initial OOP ratio decaying to 0 over
+                                # 20 steps. Mirrors the BDLO5 c1 setup.
+                                # Apply coplanar projection ONLY when the
+                                # parent geometry is well-conditioned at this
+                                # junction. We deliberately don't fall back to
+                                # a cached plane normal: a cached pn from a
+                                # past step quickly becomes stale (the parent
+                                # rotates between calls) and projecting onto
+                                # it during a quiet window then snapping when
+                                # fresh pn returns produces a visible jump.
+                                # Skipping when ill-conditioned just leaves
+                                # the child at its physics-only state, which
+                                # is usually fine.
+                                if getattr(self, '_bdlo6_use_coplanar', False) and c_i != 0:
+                                    e_p1, e_p2 = self._coplanar_parent_edges(pv_t, p_idx)
+                                    pn = torch.cross(e_p1, e_p2, dim=-1)
+                                    pn_norm = pn.norm(dim=-1, keepdim=True)
+                                    if pn_norm.min() > 5e-4:
+                                        pn = pn / pn_norm
+                                        e_c = child_verts_local[:, 1] - child_verts_local[:, 0]
+                                        e_c_len = e_c.norm(dim=-1, keepdim=True)
+                                        _decay = max(0.0, 1.0 - ith / 20.0)
+                                        current_oop = (e_c * pn).sum(-1, keepdim=True)
+                                        target_oop = (_decay * self._bdlo6_oop_ratios[c_i]) * e_c_len
+                                        # Cap per-step OOP delta at 2% of
+                                        # edge length (~1.2 mm here).
+                                        _oop_delta = target_oop - current_oop
+                                        _max_delta = 0.02 * e_c_len
+                                        _oop_delta = _oop_delta.clamp(min=-_max_delta, max=_max_delta)
+                                        e_c_corrected = e_c + _oop_delta * pn
+                                        e_c_corrected_norm = e_c_corrected.norm(dim=-1, keepdim=True)
+                                        if e_c_corrected_norm.min() > 1e-6:
+                                            child_verts_local = child_verts_local.clone()
+                                            child_verts_local[:, 1] = child_verts_local[:, 0] + e_c_corrected / e_c_corrected_norm * e_c_len
+                                            prev_children_local[c_i] = child_verts_local.clone()
 
                                 cv_t = torch.cat([cv_t[:, :c_i], child_verts_local.unsqueeze(1), cv_t[:, c_i + 1:]], dim=1)
 
@@ -1549,7 +1661,7 @@ class DEFT_sim(nn.Module):
                             e_p2 = parent_vertices[:, c1_idx + 1] - parent_vertices[:, c1_idx]
                             pn = torch.cross(e_p1, e_p2, dim=-1)
                             pn_norm = pn.norm(dim=-1, keepdim=True)
-                            if pn_norm.min() > 1e-6:
+                            if pn_norm.min() > 5e-4:
                                 pn = pn / pn_norm
                                 e_c = child1_verts[:, 1] - child1_verts[:, 0]
                                 e_c_len = e_c.norm(dim=-1, keepdim=True)
@@ -1613,7 +1725,7 @@ class DEFT_sim(nn.Module):
                                 e_c1_dir = child1_verts_as_parent[:, 1] - child1_verts_as_parent[:, 0]
                                 pn2 = torch.cross(e_par_dir, e_c1_dir, dim=-1)
                                 pn2_norm = pn2.norm(dim=-1, keepdim=True)
-                                if pn2_norm.min() > 1e-6:
+                                if pn2_norm.min() > 5e-4:
                                     pn2 = pn2 / pn2_norm
                                     e_c2 = child2_verts[:, 1] - child2_verts[:, 0]
                                     e_c2_len = e_c2.norm(dim=-1, keepdim=True)
@@ -1651,6 +1763,38 @@ class DEFT_sim(nn.Module):
                                 previous_children_vertices_iteration_edge[:, c_i].clone()
                                 for c_i in range(n_children_b6)
                             ]
+
+                            # Pre-track parent_q once per unique edge using the true
+                            # start-of-iteration previous_parent_vertices_iteration_edge*.
+                            # Without this, children sharing an attachment vertex (c2/c3
+                            # share p[7]) never accumulate parent edge rotation because
+                            # the first child's enforcement overwrites the prev state.
+                            _edge1_idx_set = set(self.rigid_body_coupling_index[_c] - 1 for _c in range(n_children_b6))
+                            _edge2_idx_set = set(self.rigid_body_coupling_index[_c] for _c in range(n_children_b6))
+                            for _idx in _edge1_idx_set:
+                                _prev_edge = previous_parent_vertices_iteration_edge1[:, _idx + 1] - previous_parent_vertices_iteration_edge1[:, _idx]
+                                _curr_edge = parent_vertices[:, _idx + 1] - parent_vertices[:, _idx]
+                                _track_rot_mat = self.constraints_enforcement.rotation_matrix_from_vectors(
+                                    _prev_edge.unsqueeze(1), _curr_edge.unsqueeze(1)).squeeze(1)
+                                _track_rot_q = pytorch3d.transforms.rotation_conversions.matrix_to_quaternion(_track_rot_mat)
+                                _new_q = pytorch3d.transforms.quaternion_multiply(_track_rot_q, parent_rod_orientation[:, _idx])
+                                parent_rod_orientation = torch.cat([parent_rod_orientation[:, :_idx], _new_q.unsqueeze(1), parent_rod_orientation[:, _idx + 1:]], dim=1)
+                            for _idx in _edge2_idx_set:
+                                if _idx in _edge1_idx_set:
+                                    continue
+                                _prev_edge = previous_parent_vertices_iteration_edge2[:, _idx + 1] - previous_parent_vertices_iteration_edge2[:, _idx]
+                                _curr_edge = parent_vertices[:, _idx + 1] - parent_vertices[:, _idx]
+                                _track_rot_mat = self.constraints_enforcement.rotation_matrix_from_vectors(
+                                    _prev_edge.unsqueeze(1), _curr_edge.unsqueeze(1)).squeeze(1)
+                                _track_rot_q = pytorch3d.transforms.rotation_conversions.matrix_to_quaternion(_track_rot_mat)
+                                _new_q = pytorch3d.transforms.quaternion_multiply(_track_rot_q, parent_rod_orientation[:, _idx])
+                                parent_rod_orientation = torch.cat([parent_rod_orientation[:, :_idx], _new_q.unsqueeze(1), parent_rod_orientation[:, _idx + 1:]], dim=1)
+                            # Freeze previous_parent_vertices_iteration_edge*_t to current
+                            # parent_vertices so the solver's internal tracking in each
+                            # per-child call is identity (no double-tracking).
+                            previous_parent_vertices_iteration_edge1 = parent_vertices.clone()
+                            previous_parent_vertices_iteration_edge2 = parent_vertices.clone()
+
                             for c_i in range(n_children_b6):
                                 p_idx = self.rigid_body_coupling_index[c_i]
                                 child_verts_local = children_vertices[:, c_i]
@@ -1688,6 +1832,37 @@ class DEFT_sim(nn.Module):
                                 ], dim=1)
                                 previous_parent_vertices_iteration_edge2 = parent_vertices.clone()
                                 prev_children_local[c_i] = child_verts_local.clone()
+
+                                # Coplanarity for child c_i (off by default;
+                                # set sim._bdlo6_use_coplanar = True to enable).
+                                # Corrects the out-of-plane component relative
+                                # to the parent bending plane at p_idx, with
+                                # the GT-initial OOP ratio decaying to 0 over
+                                # 20 steps. Mirrors the BDLO5 c1 setup.
+                                # Apply coplanar projection ONLY when the
+                                # parent geometry is well-conditioned at this
+                                # junction (skip silently otherwise — see the
+                                # numba-path comment for the rationale).
+                                if getattr(self, '_bdlo6_use_coplanar', False) and c_i != 0:
+                                    e_p1, e_p2 = self._coplanar_parent_edges(parent_vertices, p_idx)
+                                    pn = torch.cross(e_p1, e_p2, dim=-1)
+                                    pn_norm = pn.norm(dim=-1, keepdim=True)
+                                    if pn_norm.min() > 5e-4:
+                                        pn = pn / pn_norm
+                                        e_c = child_verts_local[:, 1] - child_verts_local[:, 0]
+                                        e_c_len = e_c.norm(dim=-1, keepdim=True)
+                                        _decay = max(0.0, 1.0 - ith / 20.0)
+                                        current_oop = (e_c * pn).sum(-1, keepdim=True)
+                                        target_oop = (_decay * self._bdlo6_oop_ratios[c_i]) * e_c_len
+                                        _oop_delta = target_oop - current_oop
+                                        _max_delta = 0.02 * e_c_len
+                                        _oop_delta = _oop_delta.clamp(min=-_max_delta, max=_max_delta)
+                                        e_c_corrected = e_c + _oop_delta * pn
+                                        e_c_corrected_norm = e_c_corrected.norm(dim=-1, keepdim=True)
+                                        if e_c_corrected_norm.min() > 1e-6:
+                                            child_verts_local = child_verts_local.clone()
+                                            child_verts_local[:, 1] = child_verts_local[:, 0] + e_c_corrected / e_c_corrected_norm * e_c_len
+                                            prev_children_local[c_i] = child_verts_local.clone()
 
                                 # Stitch the updated child rod back into children_vertices
                                 children_vertices = torch.cat([
@@ -2020,6 +2195,23 @@ class DEFT_sim(nn.Module):
                 _ec2 = _init_c2v[1] - _init_c2v[0]
                 self._c2_oop_ratio = (_ec2 * _pn2).sum().unsqueeze(0).unsqueeze(0) / _ec2.norm().unsqueeze(0).unsqueeze(0)
 
+        if self.bdlo6:
+            # Per-child OOP ratio relative to the parent bending plane at each
+            # child's attachment point. Mirrors the BDLO5 c1 coplanar setup.
+            _init_verts = b_DLOs_vertices_traj[:, 0].reshape(-1, self.n_vert, 3)
+            _init_pv = _init_verts[self.selected_parent_index[0]]
+            self._bdlo6_oop_ratios = []
+            n_children_b6 = len(self.rigid_body_coupling_index)
+            for c_i in range(n_children_b6):
+                _p_idx = self.rigid_body_coupling_index[c_i]
+                _ep1, _ep2 = self._coplanar_parent_edges(_init_pv, _p_idx)
+                _pn = torch.cross(_ep1, _ep2, dim=-1)
+                _pn = _pn / (_pn.norm() + 1e-10)
+                _init_cv = _init_verts[self.selected_children_index[c_i]]
+                _ec = _init_cv[1] - _init_cv[0]
+                _ratio = (_ec * _pn).sum().unsqueeze(0).unsqueeze(0) / _ec.norm().unsqueeze(0).unsqueeze(0)
+                self._bdlo6_oop_ratios.append(_ratio)
+
         # Main loop over timesteps
         for ith in range(time_horizon):
             # 1) Retrieve current/previous BDLO states
@@ -2287,7 +2479,7 @@ class DEFT_sim(nn.Module):
                             e_p2 = pv_t[:, c1_idx + 1] - pv_t[:, c1_idx]
                             pn = torch.cross(e_p1, e_p2, dim=-1)
                             pn_norm = pn.norm(dim=-1, keepdim=True)
-                            if pn_norm.min() > 1e-6:
+                            if pn_norm.min() > 5e-4:
                                 pn = pn / pn_norm
                                 e_c = child1_verts[:, 1] - child1_verts[:, 0]
                                 e_c_len = e_c.norm(dim=-1, keepdim=True)
@@ -2340,7 +2532,7 @@ class DEFT_sim(nn.Module):
                                 e_c1_dir = c1_as_parent[:, 1] - c1_as_parent[:, 0]
                                 pn2 = torch.cross(e_par_dir, e_c1_dir, dim=-1)
                                 pn2_norm = pn2.norm(dim=-1, keepdim=True)
-                                if pn2_norm.min() > 1e-6:
+                                if pn2_norm.min() > 5e-4:
                                     pn2 = pn2 / pn2_norm
                                     e_c2 = child2_verts[:, 1] - child2_verts[:, 0]
                                     e_c2_len = e_c2.norm(dim=-1, keepdim=True)
@@ -2385,6 +2577,37 @@ class DEFT_sim(nn.Module):
                             n_children_b6 = len(self.rigid_body_coupling_index)
                             prev_children_local = [prev_cv_t[:, c_i].clone() for c_i in range(n_children_b6)]
 
+                            # Pre-track parent_q once per unique edge using the true
+                            # start-of-iteration prev_pv*. Without this, children that
+                            # share an attachment vertex never see their parent edge
+                            # rotation accumulated (the first child to touch the idx
+                            # overwrites prev_pv*, and subsequent children compute a
+                            # tracking rotation of ~identity relative to a stale prev).
+                            _edge1_idx_set = set(self.rigid_body_coupling_index[_c] - 1 for _c in range(n_children_b6))
+                            _edge2_idx_set = set(self.rigid_body_coupling_index[_c] for _c in range(n_children_b6))
+                            for _idx in _edge1_idx_set:
+                                _prev_edge = prev_pv1_t[:, _idx + 1] - prev_pv1_t[:, _idx]
+                                _curr_edge = pv_t[:, _idx + 1] - pv_t[:, _idx]
+                                _track_rot_mat = self.constraints_enforcement.rotation_matrix_from_vectors(
+                                    _prev_edge.unsqueeze(1), _curr_edge.unsqueeze(1)).squeeze(1)
+                                _track_rot_q = pytorch3d.transforms.rotation_conversions.matrix_to_quaternion(_track_rot_mat)
+                                _new_q = pytorch3d.transforms.quaternion_multiply(_track_rot_q, pro_t[:, _idx])
+                                pro_t = torch.cat([pro_t[:, :_idx], _new_q.unsqueeze(1), pro_t[:, _idx + 1:]], dim=1)
+                            for _idx in _edge2_idx_set:
+                                if _idx in _edge1_idx_set:
+                                    continue
+                                _prev_edge = prev_pv2_t[:, _idx + 1] - prev_pv2_t[:, _idx]
+                                _curr_edge = pv_t[:, _idx + 1] - pv_t[:, _idx]
+                                _track_rot_mat = self.constraints_enforcement.rotation_matrix_from_vectors(
+                                    _prev_edge.unsqueeze(1), _curr_edge.unsqueeze(1)).squeeze(1)
+                                _track_rot_q = pytorch3d.transforms.rotation_conversions.matrix_to_quaternion(_track_rot_mat)
+                                _new_q = pytorch3d.transforms.quaternion_multiply(_track_rot_q, pro_t[:, _idx])
+                                pro_t = torch.cat([pro_t[:, :_idx], _new_q.unsqueeze(1), pro_t[:, _idx + 1:]], dim=1)
+                            # Freeze prev_pv*_t to current pv_t so the solver's internal
+                            # tracking for each per-child call is identity (no double-tracking).
+                            prev_pv1_t = pv_t.clone()
+                            prev_pv2_t = pv_t.clone()
+
                             for c_i in range(n_children_b6):
                                 p_idx = self.rigid_body_coupling_index[c_i]
                                 child_verts_local = cv_t[:, c_i]
@@ -2410,6 +2633,46 @@ class DEFT_sim(nn.Module):
                                 cro_t = torch.cat([cro_t[:, :c_i], _new_c_orient.unsqueeze(1), cro_t[:, c_i + 1:]], dim=1)
                                 prev_pv2_t = pv_t.clone()
                                 prev_children_local[c_i] = child_verts_local.clone()
+
+                                # Coplanarity for child c_i (off by default;
+                                # set sim._bdlo6_use_coplanar = True to enable).
+                                # Corrects the out-of-plane component relative
+                                # to the parent bending plane at p_idx, with
+                                # the GT-initial OOP ratio decaying to 0 over
+                                # 20 steps. Mirrors the BDLO5 c1 setup.
+                                # Apply coplanar projection ONLY when the
+                                # parent geometry is well-conditioned at this
+                                # junction. We deliberately don't fall back to
+                                # a cached plane normal: a cached pn from a
+                                # past step quickly becomes stale (the parent
+                                # rotates between calls) and projecting onto
+                                # it during a quiet window then snapping when
+                                # fresh pn returns produces a visible jump.
+                                # Skipping when ill-conditioned just leaves
+                                # the child at its physics-only state, which
+                                # is usually fine.
+                                if getattr(self, '_bdlo6_use_coplanar', False) and c_i != 0:
+                                    e_p1, e_p2 = self._coplanar_parent_edges(pv_t, p_idx)
+                                    pn = torch.cross(e_p1, e_p2, dim=-1)
+                                    pn_norm = pn.norm(dim=-1, keepdim=True)
+                                    if pn_norm.min() > 5e-4:
+                                        pn = pn / pn_norm
+                                        e_c = child_verts_local[:, 1] - child_verts_local[:, 0]
+                                        e_c_len = e_c.norm(dim=-1, keepdim=True)
+                                        _decay = max(0.0, 1.0 - ith / 20.0)
+                                        current_oop = (e_c * pn).sum(-1, keepdim=True)
+                                        target_oop = (_decay * self._bdlo6_oop_ratios[c_i]) * e_c_len
+                                        # Cap per-step OOP delta at 2% of
+                                        # edge length (~1.2 mm here).
+                                        _oop_delta = target_oop - current_oop
+                                        _max_delta = 0.02 * e_c_len
+                                        _oop_delta = _oop_delta.clamp(min=-_max_delta, max=_max_delta)
+                                        e_c_corrected = e_c + _oop_delta * pn
+                                        e_c_corrected_norm = e_c_corrected.norm(dim=-1, keepdim=True)
+                                        if e_c_corrected_norm.min() > 1e-6:
+                                            child_verts_local = child_verts_local.clone()
+                                            child_verts_local[:, 1] = child_verts_local[:, 0] + e_c_corrected / e_c_corrected_norm * e_c_len
+                                            prev_children_local[c_i] = child_verts_local.clone()
 
                                 cv_t = torch.cat([cv_t[:, :c_i], child_verts_local.unsqueeze(1), cv_t[:, c_i + 1:]], dim=1)
 
@@ -2553,7 +2816,7 @@ class DEFT_sim(nn.Module):
                             e_p2 = parent_vertices[:, c1_idx + 1] - parent_vertices[:, c1_idx]
                             pn = torch.cross(e_p1, e_p2, dim=-1)
                             pn_norm = pn.norm(dim=-1, keepdim=True)
-                            if pn_norm.min() > 1e-6:
+                            if pn_norm.min() > 5e-4:
                                 pn = pn / pn_norm
                                 e_c = child1_verts[:, 1] - child1_verts[:, 0]
                                 e_c_len = e_c.norm(dim=-1, keepdim=True)
@@ -2617,7 +2880,7 @@ class DEFT_sim(nn.Module):
                                 e_c1_dir = child1_verts_as_parent[:, 1] - child1_verts_as_parent[:, 0]
                                 pn2 = torch.cross(e_par_dir, e_c1_dir, dim=-1)
                                 pn2_norm = pn2.norm(dim=-1, keepdim=True)
-                                if pn2_norm.min() > 1e-6:
+                                if pn2_norm.min() > 5e-4:
                                     pn2 = pn2 / pn2_norm
                                     e_c2 = child2_verts[:, 1] - child2_verts[:, 0]
                                     e_c2_len = e_c2.norm(dim=-1, keepdim=True)
@@ -2655,6 +2918,38 @@ class DEFT_sim(nn.Module):
                                 previous_children_vertices_iteration_edge[:, c_i].clone()
                                 for c_i in range(n_children_b6)
                             ]
+
+                            # Pre-track parent_q once per unique edge using the true
+                            # start-of-iteration previous_parent_vertices_iteration_edge*.
+                            # Without this, children sharing an attachment vertex (c2/c3
+                            # share p[7]) never accumulate parent edge rotation because
+                            # the first child's enforcement overwrites the prev state.
+                            _edge1_idx_set = set(self.rigid_body_coupling_index[_c] - 1 for _c in range(n_children_b6))
+                            _edge2_idx_set = set(self.rigid_body_coupling_index[_c] for _c in range(n_children_b6))
+                            for _idx in _edge1_idx_set:
+                                _prev_edge = previous_parent_vertices_iteration_edge1[:, _idx + 1] - previous_parent_vertices_iteration_edge1[:, _idx]
+                                _curr_edge = parent_vertices[:, _idx + 1] - parent_vertices[:, _idx]
+                                _track_rot_mat = self.constraints_enforcement.rotation_matrix_from_vectors(
+                                    _prev_edge.unsqueeze(1), _curr_edge.unsqueeze(1)).squeeze(1)
+                                _track_rot_q = pytorch3d.transforms.rotation_conversions.matrix_to_quaternion(_track_rot_mat)
+                                _new_q = pytorch3d.transforms.quaternion_multiply(_track_rot_q, parent_rod_orientation[:, _idx])
+                                parent_rod_orientation = torch.cat([parent_rod_orientation[:, :_idx], _new_q.unsqueeze(1), parent_rod_orientation[:, _idx + 1:]], dim=1)
+                            for _idx in _edge2_idx_set:
+                                if _idx in _edge1_idx_set:
+                                    continue
+                                _prev_edge = previous_parent_vertices_iteration_edge2[:, _idx + 1] - previous_parent_vertices_iteration_edge2[:, _idx]
+                                _curr_edge = parent_vertices[:, _idx + 1] - parent_vertices[:, _idx]
+                                _track_rot_mat = self.constraints_enforcement.rotation_matrix_from_vectors(
+                                    _prev_edge.unsqueeze(1), _curr_edge.unsqueeze(1)).squeeze(1)
+                                _track_rot_q = pytorch3d.transforms.rotation_conversions.matrix_to_quaternion(_track_rot_mat)
+                                _new_q = pytorch3d.transforms.quaternion_multiply(_track_rot_q, parent_rod_orientation[:, _idx])
+                                parent_rod_orientation = torch.cat([parent_rod_orientation[:, :_idx], _new_q.unsqueeze(1), parent_rod_orientation[:, _idx + 1:]], dim=1)
+                            # Freeze previous_parent_vertices_iteration_edge*_t to current
+                            # parent_vertices so the solver's internal tracking in each
+                            # per-child call is identity (no double-tracking).
+                            previous_parent_vertices_iteration_edge1 = parent_vertices.clone()
+                            previous_parent_vertices_iteration_edge2 = parent_vertices.clone()
+
                             for c_i in range(n_children_b6):
                                 p_idx = self.rigid_body_coupling_index[c_i]
                                 child_verts_local = children_vertices[:, c_i]
@@ -2692,6 +2987,37 @@ class DEFT_sim(nn.Module):
                                 ], dim=1)
                                 previous_parent_vertices_iteration_edge2 = parent_vertices.clone()
                                 prev_children_local[c_i] = child_verts_local.clone()
+
+                                # Coplanarity for child c_i (off by default;
+                                # set sim._bdlo6_use_coplanar = True to enable).
+                                # Corrects the out-of-plane component relative
+                                # to the parent bending plane at p_idx, with
+                                # the GT-initial OOP ratio decaying to 0 over
+                                # 20 steps. Mirrors the BDLO5 c1 setup.
+                                # Apply coplanar projection ONLY when the
+                                # parent geometry is well-conditioned at this
+                                # junction (skip silently otherwise — see the
+                                # numba-path comment for the rationale).
+                                if getattr(self, '_bdlo6_use_coplanar', False) and c_i != 0:
+                                    e_p1, e_p2 = self._coplanar_parent_edges(parent_vertices, p_idx)
+                                    pn = torch.cross(e_p1, e_p2, dim=-1)
+                                    pn_norm = pn.norm(dim=-1, keepdim=True)
+                                    if pn_norm.min() > 5e-4:
+                                        pn = pn / pn_norm
+                                        e_c = child_verts_local[:, 1] - child_verts_local[:, 0]
+                                        e_c_len = e_c.norm(dim=-1, keepdim=True)
+                                        _decay = max(0.0, 1.0 - ith / 20.0)
+                                        current_oop = (e_c * pn).sum(-1, keepdim=True)
+                                        target_oop = (_decay * self._bdlo6_oop_ratios[c_i]) * e_c_len
+                                        _oop_delta = target_oop - current_oop
+                                        _max_delta = 0.02 * e_c_len
+                                        _oop_delta = _oop_delta.clamp(min=-_max_delta, max=_max_delta)
+                                        e_c_corrected = e_c + _oop_delta * pn
+                                        e_c_corrected_norm = e_c_corrected.norm(dim=-1, keepdim=True)
+                                        if e_c_corrected_norm.min() > 1e-6:
+                                            child_verts_local = child_verts_local.clone()
+                                            child_verts_local[:, 1] = child_verts_local[:, 0] + e_c_corrected / e_c_corrected_norm * e_c_len
+                                            prev_children_local[c_i] = child_verts_local.clone()
 
                                 # Stitch the updated child rod back into children_vertices
                                 children_vertices = torch.cat([

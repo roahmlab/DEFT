@@ -344,4 +344,3 @@ dependencies:
   - zlib-ng=2.2.5=hde8ca8f_0
   - zstandard=0.25.0=py311haee01d2_0
   - zstd=1.5.7=hb8e6e7a_2
-prefix: /home/yizhouch/miniforge3/envs/DEFT
