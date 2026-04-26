@@ -1258,6 +1258,82 @@ class Eval_DEFTData(Dataset):
                 target_vertices.clone().detach())
 
 
+class Test_DEFTData(Dataset):
+    """
+    A PyTorch Dataset for loading and transforming evaluation data for DEFT-based rod simulation.
+    Each data item is (previous_vertices, current_vertices, target_vertices), typically over a longer time horizon.
+    """
+
+    def __init__(self, BDLO_type, n_parent_vertices, n_children_vertices, n_branch,
+                 rigid_body_coupling_index, eval_set_number, total_time, eval_time_horizon, device, bdlo5):
+        super(Test_DEFTData, self).__init__()
+        # Root directory for evaluation data
+        repo_root = Path(__file__).resolve().parents[2]
+        self.root_dir = repo_root / "dataset" / f"BDLO{BDLO_type}" / "test"
+        file_list = sorted(self.root_dir.glob("*"))
+        self.device = device
+
+        self.BDLOs_previous_vertices = []
+        self.BDLOs_vertices = []
+        self.BDLOs_target_vertices = []
+
+        n_child1_vertices, n_child2_vertices = n_children_vertices
+
+        # Hard-coded transformations
+        point1 = np.array([0.652495, 0.012239, -0.703962])
+        point2 = np.array([0.359612, 0.012701, -0.701503])
+        point3 = np.array([0.358077, 0.009511, -0.995053])
+        midpoint = np.array([
+            point2[0] + (point1[0] - point2[0]) / 2.,
+            (point1[1] + point2[1] + point3[1]) / 3,
+            point2[2] - (point2[2] - point3[2]) / 2.
+        ])
+        midpoint_mod = torch.tensor(np.array([-midpoint[2], -midpoint[0], midpoint[1]]))
+
+        bar = tqdm(file_list)
+        for rope_data in bar:
+            # Same reading procedure as training set
+            verts = torch.tensor(pd.read_pickle(r'%s' % str(rope_data))) \
+                .view(3, total_time, -1).permute(1, 2, 0)
+
+            parent_vertices = verts[:, :n_parent_vertices]
+            child1_vertices = verts[:, n_parent_vertices: n_parent_vertices + n_child1_vertices - 1]
+            child2_vertices = verts[:, n_parent_vertices + n_child1_vertices - 1:]
+
+            BDLO_vert_no_trans = construct_BDLOs_data(total_time, rigid_body_coupling_index,
+                                                      n_parent_vertices, n_children_vertices,
+                                                      n_branch, parent_vertices, child1_vertices, child2_vertices,
+                                                      bdlo5=bdlo5)
+            BDLO_vert = torch.zeros_like(BDLO_vert_no_trans)
+            BDLO_vert[:, :, :, 0] = -BDLO_vert_no_trans[:, :, :, 2]
+            BDLO_vert[:, :, :, 1] = -BDLO_vert_no_trans[:, :, :, 0]
+            BDLO_vert[:, :, :, 2] = BDLO_vert_no_trans[:, :, :, 1]
+
+            # We only take the first [eval_time_horizon] chunk for the previous, current, target.
+            if not BDLO_vert[0: 0 + eval_time_horizon].size() == (eval_time_horizon, n_branch, n_parent_vertices, 3):
+                print("False Size")
+            self.BDLOs_previous_vertices.append(BDLO_vert[0: 0 + eval_time_horizon].numpy())
+            self.BDLOs_vertices.append(BDLO_vert[1: 1 + eval_time_horizon].numpy())
+            self.BDLOs_target_vertices.append(BDLO_vert[2: 2 + eval_time_horizon].numpy())
+
+        self.previous_vertices = np.array(self.BDLOs_previous_vertices)
+        self.vertices = np.array(self.BDLOs_vertices)
+        self.target_vertices = np.array(self.BDLOs_target_vertices)
+
+    def __len__(self):
+        # Number of evaluation sequences
+        return len(self.vertices)
+
+    def __getitem__(self, index):
+        # Return (previous, current, target)
+        previous_vertices = torch.tensor(self.previous_vertices[index]).to(self.device)
+        vertices = torch.tensor(self.vertices[index]).to(self.device)
+        target_vertices = torch.tensor(self.target_vertices[index]).to(self.device)
+        return (previous_vertices.clone().detach(),
+                vertices.clone().detach(),
+                target_vertices.clone().detach())
+    
+
 # ============================================================================
 # BDLO6 dataset support (separate from the BDLO1–5 path; nothing above this
 # line is touched). BDLO6 has 4 branches: parent(12) + c1(4) + c2(2) + c3(3),
