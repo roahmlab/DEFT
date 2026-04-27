@@ -103,6 +103,31 @@ python3 DEFT_train.py --BDLO_type 1 --load_model true --training_mode residual -
 | `--inference_vis` | bool | `false` | Visualize eval rollouts during training (for debugging). |
 | `--undeform_vis` | bool | `false` | Visualize the undeformed reference pose only, then exit. |
 
+## Planning Tests
+Three IPOPT-based planning scripts under `tests/` exercise the trained DEFT simulator on manipulation tasks. Run from the repo root with the `DEFT` environment activated:
+```bash
+cd DEFT
+conda activate DEFT
+```
+
+### Shape matching (BDLO1)
+```bash
+python tests/shape_matching.py --sample_idx 0
+python tests/shape_matching.py --full_batch
+```
+
+### Parent-branch thread insertion
+```bash
+python tests/parent_branch_thread_insertion.py --config 1 --height 1 --hole A
+python tests/parent_branch_thread_insertion.py --config 2 --height 3 --hole B
+```
+
+### Child-branch thread insertion (BDLO5)
+```bash
+python tests/child_branch_thread_insertion.py --kinova 1 --franka 1 --target 1
+python tests/child_branch_thread_insertion.py --kinova 2 --franka 1 --target 1
+```
+
 ## Dataset
 - For each BDLO, dynamic trajectory data is captured in real-world settings using a motion capture system operating at 100 Hz when robots grasp the BDLO’s ends. For details on dataset usage, please refer to DEFT_train.py.
 - For BDLO 1 and BDLO 3, we record dynamic trajectory data when one robot grasps the middle of the BDLO while the other robot grasps one of its ends.
