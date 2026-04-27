@@ -4,7 +4,7 @@ This repository contains the source code for the paper DEFT: Differentiable Bran
 
 ## Introduction
 <p align="center">
-  <img height="295" width="1200" src="assets/demo_image.png"/>
+  <img height="295" width="1200" src="assets/title_page.png"/>
 </p>
 
 The figures above illustrate how DEFT can be used to autonomously perform a wire insertion task.
