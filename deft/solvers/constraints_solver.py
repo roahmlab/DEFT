@@ -4,8 +4,6 @@ from itertools import repeat, permutations
 import torch
 import pytorch3d
 import pytorch3d.transforms.rotation_conversions
-from click.core import batch
-from numpy.core.defchararray import lower
 
 torch.set_default_dtype(torch.float64)
 import torch.nn as nn

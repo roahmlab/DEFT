@@ -8,7 +8,6 @@ import torch.nn as nn
 import sys
 import os
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 import numpy as np
 import pickle
 import warnings
@@ -31,6 +30,7 @@ from torch.utils.data import DataLoader
 
 # Global simulation time configuration
 SIM_TIME_HORIZON = 100  # Adjust this to change simulation duration
+WARMUP_STEPS = 300      # Pre-IPOPT settle phase: 3 s at dt=0.01
 
 def setup_deft_sim(load_checkpoint=None, use_orientation_constraints=True, use_attachment_constraints=True):
     """Setup DEFT simulation with BDLO1 (from DEFT_train.py)"""
@@ -128,6 +128,42 @@ def setup_deft_sim(load_checkpoint=None, use_orientation_constraints=True, use_a
         print(f"Loaded checkpoint from {load_checkpoint}")
     
     return deft_sim, b_undeformed_vert, parent_theta_clamp, child1_theta_clamp, child2_theta_clamp
+
+
+def warmup_simulation(deft_sim, b_DLOs_vertices_traj, previous_b_DLOs_vertices_traj,
+                      parent_clamped_selection, parent_theta_clamp,
+                      child1_theta_clamp, child2_theta_clamp,
+                      warmup_steps=WARMUP_STEPS, dt=0.01):
+    """Hold clamps fixed at the initial position so the rod settles before IPOPT.
+    Returns updated trajectories with [:, 0] replaced by the last and
+    second-to-last warm-up frames (preserves velocity via the prev/current pair).
+    """
+    n_vert = b_DLOs_vertices_traj.shape[3]
+    initial_clamped = b_DLOs_vertices_traj[0, 0, 0, parent_clamped_selection].detach().clone()
+
+    clamped_warm = torch.zeros(1, warmup_steps, 3, n_vert, 3, dtype=torch.float64)
+    for t in range(warmup_steps):
+        for i, idx in enumerate(parent_clamped_selection):
+            clamped_warm[0, t, 0, idx] = initial_clamped[i]
+
+    with torch.no_grad():
+        warm_traj, _ = deft_sim.iterative_predict(
+            time_horizon=warmup_steps,
+            b_DLOs_vertices_traj=b_DLOs_vertices_traj,
+            previous_b_DLOs_vertices_traj=previous_b_DLOs_vertices_traj,
+            clamped_positions=clamped_warm,
+            dt=dt,
+            parent_theta_clamp=parent_theta_clamp,
+            child1_theta_clamp=child1_theta_clamp,
+            child2_theta_clamp=child2_theta_clamp,
+            inference_1_batch=True,
+        )
+
+    new_b = b_DLOs_vertices_traj.detach().clone()
+    new_prev = previous_b_DLOs_vertices_traj.detach().clone()
+    new_b[:, 0] = warm_traj[:, -1]
+    new_prev[:, 0] = warm_traj[:, -2]
+    return new_b, new_prev
 
 
 def create_custom_trajectory(initial_state, time_horizon, parent_clamped_selection):
@@ -458,54 +494,40 @@ def trajectory_optimization_ipopt(deft_sim, b_DLOs_vertices_traj, previous_b_DLO
     
     return solution, info, optimized_traj, elapsed_time, problem_obj.converged
 
-def animate_prediction(predicted_vertices, target_vertices, skip_frames=5, title_prefix="Prediction"):
-    """Create animation showing optimization process moving toward static target"""
-    pred = predicted_vertices[0]  # [time, branch, vert, 3]
-    target = target_vertices[0, -1]  # [branch, vert, 3] - static final configuration
-    
-    print(f"\n[Animation] Target: target_vertices[0, -1]")
-    print(f"  Shape: {target.shape}")
-    print(f"  Branch 0 endpoints: {target[0, [0,1,11,12]]}")
-    
+def save_pose_figure(pred_frame, target_frame, save_path, title):
+    """Save a single PNG of one prediction pose (solid) overlaid on the target (faded)."""
+    colors = ['red', 'green', 'blue']
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111, projection='3d')
-    colors = ['red', 'green', 'blue']
-    
-    def update(frame):
-        ax.clear()
-        
-        # Plot static target (faded)
-        for i in range(3):
-            verts = target[i]
-            mask = torch.any(verts != 0, dim=-1)
-            valid = verts[mask]
-            if len(valid) > 0:
-                ax.plot(valid[:, 0], valid[:, 1], valid[:, 2], 'o-', color=colors[i], 
-                       linewidth=2, alpha=0.3, label=f'Target {i}')
-        
-        # Overlay current prediction (solid)elapsed_time
-        for i in range(3):
-            verts = pred[frame, i]
-            mask = torch.any(verts != 0, dim=-1)
-            valid = verts[mask]
-            if len(valid) > 0:
-                ax.plot(valid[:, 0], valid[:, 1], valid[:, 2], 'o-', color=colors[i], 
-                       linewidth=2, markersize=6, label=f'{title_prefix} {i}')
-        
-        ax.set_title(f'{title_prefix} (solid) → Target (faded) - Frame {frame}')
-        ax.set_xlim(-0.8, 0.4)
-        ax.set_ylim(-0.3, 0.3)
-        ax.set_zlim(-0.1, 0.3)
-        ax.legend()
-    
-    frames = range(0, pred.shape[0], skip_frames)
-    anim = FuncAnimation(fig, update, frames=frames, interval=50)
+
+    for i in range(3):
+        verts = target_frame[i]
+        mask = torch.any(verts != 0, dim=-1)
+        valid = verts[mask]
+        if len(valid) > 0:
+            ax.plot(valid[:, 0], valid[:, 1], valid[:, 2], 'o-', color=colors[i],
+                    linewidth=2, alpha=0.3, label=f'Target {i}')
+
+    for i in range(3):
+        verts = pred_frame[i]
+        mask = torch.any(verts != 0, dim=-1)
+        valid = verts[mask]
+        if len(valid) > 0:
+            ax.plot(valid[:, 0], valid[:, 1], valid[:, 2], 'o-', color=colors[i],
+                    linewidth=2, markersize=6, label=f'Pred {i}')
+
+    ax.set_title(title)
+    ax.set_xlim(-0.8, 0.4)
+    ax.set_ylim(-0.3, 0.3)
+    ax.set_zlim(-0.1, 0.3)
+    ax.legend()
     plt.tight_layout()
-    return anim
+    plt.savefig(save_path, dpi=150)
+    plt.close(fig)
 
 def run_deft(i, checkpoint_path, b_DLOs_vertices_traj, previous_b_DLOs_vertices_traj, target_b_DLOs_vertices_traj,
              gradient_check=False):
-    """Run a single ablation configuration: gradient check + IPOPT optimization.
+    """Run DEFT shape matching: gradient check + IPOPT optimization.
 
     Returns (optimized_traj, elapsed_time, final_cost) or None if IPOPT unavailable.
     """
@@ -517,6 +539,13 @@ def run_deft(i, checkpoint_path, b_DLOs_vertices_traj, previous_b_DLOs_vertices_
     )
 
     parent_clamped_selection = torch.tensor((0, 1, -2, -1))
+
+    b_DLOs_vertices_traj, previous_b_DLOs_vertices_traj = warmup_simulation(
+        deft_sim, b_DLOs_vertices_traj, previous_b_DLOs_vertices_traj,
+        parent_clamped_selection, parent_theta_clamp,
+        child1_theta_clamp, child2_theta_clamp,
+    )
+
     custom_control = create_custom_trajectory(b_DLOs_vertices_traj, SIM_TIME_HORIZON, parent_clamped_selection)
 
     # Gradient check
@@ -561,11 +590,17 @@ def run_deft(i, checkpoint_path, b_DLOs_vertices_traj, previous_b_DLOs_vertices_
     vis_dir = os.path.join(os.path.dirname(__file__), 'visualization', 'shape_matching')
     os.makedirs(vis_dir, exist_ok=True)
 
-    # Save animation
-    anim = animate_prediction(optimized_traj, target_b_DLOs_vertices_traj, title_prefix=f"Optimized")
-    filename = os.path.join(vis_dir, f"optimized_trajectory_{i}.mp4")
-    anim.save(filename, writer='ffmpeg', fps=20)
-    print(f"Animation saved to: {filename}")
+    target_frame = target_b_DLOs_vertices_traj[0, -1]
+    save_pose_figure(
+        optimized_traj[0, 0], target_frame,
+        os.path.join(vis_dir, f"initial_{i}.png"),
+        title=f"Sample {i}: initial pose vs target",
+    )
+    save_pose_figure(
+        optimized_traj[0, -1], target_frame,
+        os.path.join(vis_dir, f"final_{i}.png"),
+        title=f"Sample {i}: final pose vs target",
+    )
     
     # Save controlled vertex's trajectory as pkl file
     out_dir_pkl = os.path.join(os.path.dirname(__file__), 'trajectories', 'shape_matching')

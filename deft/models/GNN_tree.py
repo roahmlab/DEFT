@@ -3,10 +3,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from click.core import batch
 import numpy as np
-from fontTools.misc.psOperators import PSOperators
-from sympy.codegen import Print
 
 from ..utils.util import visualize_tensors_3d_in_same_plot_no_zeros
 np.set_printoptions(threshold=np.inf)

@@ -22,7 +22,6 @@ import os
 import glob
 import pickle
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 import numpy as np
 import argparse
 import time
@@ -46,7 +45,7 @@ from deft.core.DEFT_sim import DEFT_sim
 
 # ---- Configuration ----
 SIM_TIME_HORIZON = 100
-WARMUP_STEPS = 100  # 1 second at dt=0.01
+WARMUP_STEPS = 300  # 3 seconds at dt=0.01
 DATASET_DIR = os.path.join(os.path.dirname(__file__), '..', 'dataset', 'BDLO_child_branch_thread_insertion')
 
 # BDLO5 parameters
@@ -202,10 +201,9 @@ def setup_deft_sim(parent_clamped_selection, load_checkpoint=None):
     child1_vertices = undeformed_BDLO[:, N_PARENT:N_PARENT + N_CHILD1 - 1]
     child2_vertices = undeformed_BDLO[:, N_PARENT + N_CHILD1 - 1:]
 
-    # Match visualizations/predict_bdlo5_biased.py and scripts/DEFT_train.py:
-    # treat the parent rod as effectively infinite mass/MOI so the children
-    # absorb all attachment-coupling correction (parent_mass_scale=1e6,
-    # parent_moment_scale=1e6).
+    # Match scripts/DEFT_train.py: treat the parent rod as effectively infinite
+    # mass/MOI so the children absorb all attachment-coupling correction
+    # (parent_mass_scale=1e6, parent_moment_scale=1e6).
     b_DLO_mass, parent_MOI, children_MOI, _, _, _ = DEFT_initialization(
         parent_vertices, child1_vertices, child2_vertices, N_BRANCH, N_PARENT,
         (N_CHILD1, N_CHILD2), COUPLING_INDEX, 1e6, 1e6, (0.5, 0.5), (1, 1), 0.1,
@@ -236,10 +234,10 @@ def setup_deft_sim(parent_clamped_selection, load_checkpoint=None):
     )
 
     bend_stiffness_parent = nn.Parameter(2e-3 * torch.ones((1, 1, N_PARENT - 1), device=device))
-    bend_stiffness_child1 = nn.Parameter(2e-3 * torch.ones((1, 1, N_PARENT - 1), device=device))
+    bend_stiffness_child1 = nn.Parameter(2.e-3 * torch.ones((1, 1, N_PARENT - 1), device=device))
     bend_stiffness_child2 = nn.Parameter(2e-3 * torch.ones((1, 1, N_PARENT - 1), device=device))
     twist_stiffness = nn.Parameter(1e-4 * torch.ones((1, N_BRANCH, N_PARENT - 1), device=device))
-    damping = nn.Parameter(torch.tensor((3., 3., 3.), device=device))
+    damping = nn.Parameter(torch.tensor((3., 8., 6.), device=device))
     learning_weight = nn.Parameter(torch.tensor(0.0, device=device))
 
     deft_sim = DEFT_sim(
@@ -259,9 +257,9 @@ def setup_deft_sim(parent_clamped_selection, load_checkpoint=None):
         bdlo5=True
     )
 
-    # Mirror the inference (predict_bdlo5_biased.py) and training setup: c1
-    # absorbs ~0 of the c2 attachment correction and c2 absorbs ~all, for both
-    # position (mass) and rotation (MOI / momentum) coupling.
+    # Mirror the training setup: c1 absorbs ~0 of the c2 attachment correction
+    # and c2 absorbs ~all, for both position (mass) and rotation (MOI /
+    # momentum) coupling.
     deft_sim.child2_coupling_mass_scale = torch.tensor(
         [[[[0., 0., 0.], [0., 0., 0.], [0., 0., 0.]],
           [[-1., 0., 0.], [0., -1., 0.], [0., 0., -1.]]]],
@@ -295,7 +293,7 @@ class ChildBranchInsertionProblem:
 
     def __init__(self, deft_sim, initial_branched, parent_theta_clamp,
                  child1_theta_clamp, child2_theta_clamp, target_pos,
-                 parent_clamped_selection, hole_pts=None):
+                 parent_clamped_selection, hole_pts=None, previous_branched=None):
         self.deft_sim = deft_sim
         self.deft_sim.eval()
         self.hole_pts = hole_pts if hole_pts is not None else np.zeros((4, 3))
@@ -304,6 +302,9 @@ class ChildBranchInsertionProblem:
             param.requires_grad = False
 
         self.initial_branched = initial_branched.detach().clone()
+        self.previous_branched = (previous_branched.detach().clone()
+                                  if previous_branched is not None
+                                  else self.initial_branched.clone())
         self.parent_theta_clamp = parent_theta_clamp
         self.child1_theta_clamp = child1_theta_clamp
         self.child2_theta_clamp = child2_theta_clamp
@@ -317,6 +318,10 @@ class ChildBranchInsertionProblem:
         self.iteration = 0
         self.converged = False
         self.best_solution = None
+
+        # Force-capture state for intermediate() callback
+        self.captured_traj = None
+        self.captured_forces = []
 
     def _expand_displacements(self, displacement):
         """Expand 3 DOF to per-clamped-vertex displacements (4, 3).
@@ -345,7 +350,7 @@ class ChildBranchInsertionProblem:
     def _run_sim(self, clamped_full, grad_enabled=False):
         """Run DEFT forward simulation."""
         b_current = self.initial_branched.unsqueeze(1)
-        b_previous = self.initial_branched.unsqueeze(1)
+        b_previous = self.previous_branched.unsqueeze(1)
 
         if grad_enabled:
             pred, _ = self.deft_sim.iterative_predict(
@@ -379,7 +384,24 @@ class ChildBranchInsertionProblem:
         self.last_x = x.copy()
         disp = torch.from_numpy(x).double()
         clamped = self._build_clamped_trajectory(disp)
-        pred = self._run_sim(clamped, grad_enabled=False)
+
+        # Wrap Internal_Force_Vectorize so we record bending+twist forces per
+        # timestep — used by intermediate() to print c1/c2 force stats.
+        orig_internal = self.deft_sim.Internal_Force_Vectorize
+        captured = []
+        def _capture(*a, **kw):
+            f = orig_internal(*a, **kw)
+            captured.append(f.detach().clone())
+            return f
+        self.deft_sim.Internal_Force_Vectorize = _capture
+        try:
+            pred = self._run_sim(clamped, grad_enabled=False)
+        finally:
+            self.deft_sim.Internal_Force_Vectorize = orig_internal
+
+        self.captured_traj = pred.detach().clone()
+        self.captured_forces = captured
+
         # pred: (1, time, n_branch, max_vert, 3)
         tip_final = pred[0, -1, TIP_BRANCH, TIP_VERTEX]  # child2 tip at final time
         cost = torch.sum((tip_final - self.target_pos) ** 2).item()
@@ -397,10 +419,20 @@ class ChildBranchInsertionProblem:
 
     def intermediate(self, alg_mod, iter_count, obj_value, inf_pr, inf_du, mu,
                      d_norm, regularization_size, alpha_du, alpha_pr, ls_trials):
-        """Intermediate callback: print end effector position and the cost after each IPOPT iteration."""
+        """Intermediate callback: print end effector + c1/c2 bending+twist force stats."""
         if self.last_x is not None:
             abs_pos = self.initial_clamped[0].numpy() + self.last_x
             print(f"  [IPOPT iter {iter_count}] end effector: {abs_pos}, obj: {obj_value:.6f}")
+
+        if self.captured_forces:
+            c1_idx = int(self.deft_sim.selected_child1_index[0])
+            c2_idx = int(self.deft_sim.selected_child2_index[0])
+            f_stack = torch.stack(self.captured_forces, dim=0)  # (T, n_branch, n_vert, 3)
+            c1_mag = f_stack[:, c1_idx].norm(dim=-1)
+            c2_mag = f_stack[:, c2_idx].norm(dim=-1)
+            print(f"    bending+twist force | c1: peak={c1_mag.max().item():.4f} "
+                  f"mean={c1_mag.mean().item():.4f} | "
+                  f"c2: peak={c2_mag.max().item():.4f} mean={c2_mag.mean().item():.4f}")
 
         if self.converged:
             return False
@@ -537,15 +569,50 @@ def finite_difference_gradient(problem_obj, x, eps=1e-6):
     return fd_grad
 
 
+def warmup_simulation(deft_sim, initial_branched, parent_clamped_selection,
+                      parent_theta_clamp, child1_theta_clamp, child2_theta_clamp,
+                      warmup_steps=WARMUP_STEPS, dt=0.01):
+    """Hold clamps fixed at the initial position so the rod settles before Stage 1.
+    Returns (settled_current, settled_previous) — last and second-to-last warm-up
+    frames, so the next sim sees the settled state with its true velocity.
+    """
+    initial_clamped = initial_branched[0, 0, parent_clamped_selection].detach().clone()  # (4, 3)
+
+    clamped_warm = torch.zeros(1, warmup_steps, N_BRANCH, N_PARENT, 3, dtype=torch.float64)
+    for t in range(warmup_steps):
+        for i, idx in enumerate(parent_clamped_selection):
+            clamped_warm[0, t, 0, idx] = initial_clamped[i]
+
+    b_current = initial_branched.unsqueeze(1)
+    b_previous = initial_branched.unsqueeze(1)
+    with torch.no_grad():
+        warm_traj, _ = deft_sim.iterative_predict(
+            time_horizon=warmup_steps,
+            b_DLOs_vertices_traj=b_current,
+            previous_b_DLOs_vertices_traj=b_previous,
+            clamped_positions=clamped_warm,
+            dt=dt,
+            parent_theta_clamp=parent_theta_clamp,
+            child1_theta_clamp=child1_theta_clamp,
+            child2_theta_clamp=child2_theta_clamp,
+            inference_1_batch=True,
+        )
+
+    settled_current = warm_traj[:, -1].detach().clone()
+    settled_previous = warm_traj[:, -2].detach().clone()
+    return settled_current, settled_previous
+
+
 def _run_single_stage(deft_sim, initial_branched, parent_theta_clamp,
                       child1_theta_clamp, child2_theta_clamp, target,
                       parent_clamped_selection, stage_name, run_grad_check=True,
-                      hole_pts=None):
+                      hole_pts=None, previous_branched=None):
     """Run a single IPOPT optimization stage."""
     problem_obj = ChildBranchInsertionProblem(
         deft_sim, initial_branched, parent_theta_clamp,
         child1_theta_clamp, child2_theta_clamp, target,
-        parent_clamped_selection, hole_pts=hole_pts
+        parent_clamped_selection, hole_pts=hole_pts,
+        previous_branched=previous_branched,
     )
 
     # Gradient check
@@ -591,7 +658,8 @@ def _run_single_stage(deft_sim, initial_branched, parent_theta_clamp,
     clamped_full = problem_obj._build_clamped_trajectory(disp)
     with torch.no_grad():
         b_current = initial_branched.unsqueeze(1)
-        b_previous = initial_branched.unsqueeze(1)
+        b_previous = (previous_branched.unsqueeze(1) if previous_branched is not None
+                      else initial_branched.unsqueeze(1))
         optimized_traj, _ = deft_sim.iterative_predict(
             time_horizon=SIM_TIME_HORIZON,
             b_DLOs_vertices_traj=b_current,
@@ -673,8 +741,10 @@ def run_child_branch_insertion(kinova_id, franka_id, target_id, checkpoint_path=
         parent_clamped_selection, load_checkpoint=checkpoint_path
     )
 
-    # Stage 1 starts directly from the raw mocap state (no warmup).
-    settled_state = initial_branched
+    settled_state, previous_settled = warmup_simulation(
+        deft_sim, initial_branched, parent_clamped_selection,
+        parent_theta_clamp, child1_theta_clamp, child2_theta_clamp,
+    )
 
     # ===== STAGE 1: Align =====
     print(f"\n{'='*60}")
@@ -684,7 +754,7 @@ def run_child_branch_insertion(kinova_id, franka_id, target_id, checkpoint_path=
         deft_sim, settled_state, parent_theta_clamp,
         child1_theta_clamp, child2_theta_clamp, target_align,
         parent_clamped_selection, "Stage1-Align", run_grad_check=gradient_check,
-        hole_pts=hole_pts
+        hole_pts=hole_pts, previous_branched=previous_settled,
     )
 
     tip_after_align = traj1[0, -1, TIP_BRANCH, TIP_VERTEX].numpy()
@@ -706,7 +776,7 @@ def run_child_branch_insertion(kinova_id, franka_id, target_id, checkpoint_path=
         deft_sim, initial_for_insert, parent_theta_clamp,
         child1_theta_clamp, child2_theta_clamp, target_insert,
         parent_clamped_selection, "Stage2-Insert", run_grad_check=gradient_check,
-        hole_pts=hole_pts
+        hole_pts=hole_pts,
     )
 
     tip_after_insert = traj2[0, -1, TIP_BRANCH, TIP_VERTEX].numpy()
@@ -801,72 +871,6 @@ def visualize_result(optimized_traj, initial_branched, target_pt, hole_pts, flat
         print(f"Saved figure to {save_path}")
     else:
         plt.show()
-
-
-def animate_result(optimized_traj, initial_branched, target_pt, hole_pts,
-                   kinova_id, franka_id, target_id, save_path=None, skip=2, fps=None):
-    """Animate the child-branch thread insertion."""
-    traj = optimized_traj[0].numpy()
-    target = target_pt
-
-    # Precompute fixed axis limits
-    all_points = []
-    for t in range(traj.shape[0]):
-        for bi in range(traj.shape[1]):
-            v = traj[t, bi]
-            mask = np.any(v != 0, axis=-1)
-            if mask.any():
-                all_points.append(v[mask])
-    all_points.append(hole_pts)
-    all_points.append(np.array(target).reshape(1, 3))
-    all_points = np.concatenate(all_points, axis=0)
-    # Equal axis scaling
-    mid = (all_points.max(axis=0) + all_points.min(axis=0)) / 2
-    half_range = (all_points.max(axis=0) - all_points.min(axis=0)).max() / 2 * 1.1
-
-    fig = plt.figure(figsize=(8, 6))
-    ax = fig.add_subplot(111, projection='3d')
-    colors = ['red', 'blue', 'green']
-
-    def update(frame):
-        ax.clear()
-        for bi, c in enumerate(colors):
-            v = traj[frame, bi]
-            mask = np.any(v != 0, axis=-1)
-            if mask.any():
-                ax.plot(v[mask, 0], v[mask, 1], v[mask, 2], 'o-', color=c, linewidth=2, markersize=4)
-        # Hole
-        tri = [0, 1, 2, 0]
-        ax.plot(hole_pts[tri, 0], hole_pts[tri, 1], hole_pts[tri, 2],
-                '^-', color='green', linewidth=2, markersize=8)
-        # Target
-        ax.scatter(*target, color='cyan', s=100, marker='x', linewidths=3)
-        # Child2 tip trace
-        tips = traj[:frame+1, TIP_BRANCH, TIP_VERTEX]
-        ax.plot(tips[:, 0], tips[:, 1], tips[:, 2], '--', color='orange', alpha=0.5)
-
-        ax.set_xlim(mid[0] - half_range, mid[0] + half_range)
-        ax.set_ylim(mid[1] - half_range, mid[1] + half_range)
-        ax.set_zlim(mid[2] - half_range, mid[2] + half_range)
-        ax.set_box_aspect([1, 1, 1])
-
-        ax.set_title(f'kinova{kinova_id}_franka{franka_id}->target{target_id} '
-                     f'Frame {frame}/{traj.shape[0]}')
-        ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
-        ax.view_init(elev=20, azim=-60)
-
-    frames = range(0, traj.shape[0], skip)
-    anim = FuncAnimation(fig, update, frames=frames, interval=50)
-
-    if save_path:
-        # Default: real-time at dt=0.01 (100 fps / skip)
-        if fps is None:
-            fps = int(100 / skip)
-        anim.save(save_path, writer='ffmpeg', fps=fps)
-        print(f"Saved animation to {save_path}")
-    else:
-        plt.show()
-    return anim
 
 
 if __name__ == "__main__":
@@ -976,11 +980,6 @@ if __name__ == "__main__":
     fig_path = os.path.join(vis_dir, f'{tag}.png')
     visualize_result(optimized_traj, initial_branched, target_pt, hole_pts, flat_pts,
                      args.kinova, args.franka, args.target, save_path=fig_path)
-    
-    # Save animation
-    anim_path = os.path.join(vis_dir, f'{tag}.mp4')
-    animate_result(optimized_traj, initial_branched, target_pt, hole_pts,
-                   args.kinova, args.franka, args.target, save_path=anim_path)
 
     # Save controlled vertex's trajectory as pkl file
     out_dir_pkl = os.path.join(os.path.dirname(__file__), 'trajectories', 'child_branch_thread_insertion')

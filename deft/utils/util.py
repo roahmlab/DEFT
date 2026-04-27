@@ -6,7 +6,6 @@ import pytorch3d
 from pathlib import Path
 import pickle
 import pytorch3d.transforms.rotation_conversions
-from sympy import pprint
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
 import random

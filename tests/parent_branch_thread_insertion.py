@@ -10,7 +10,6 @@ import sys
 import os
 import pickle
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 import numpy as np
 import argparse
 import time
@@ -210,7 +209,6 @@ class ThreadInsertionProblem:
     """IPOPT problem: optimize shared v1/v2 displacement (3 DOF) to guide vertex 0 through a hole.
 
     Clamped vertices: 1, 2 (control pair, shared displacement), 11, 12 (hard-clamped fixed).
-    Like move_bdlo_ablation.py: paired vertices share displacement to maintain relative offset.
     """
 
     def __init__(self, deft_sim, initial_branched, parent_theta_clamp,
@@ -349,11 +347,6 @@ def visualize_initial_state(initial_branched, target, hole_pts, hole_center, hol
         if mask.any():
             ax1.plot(v[mask, 0], v[mask, 1], v[mask, 2], 'o-',
                      color=branch_colors[bi], linewidth=2, markersize=5, label=branch_labels[bi])
-    # Highlight vertex 0 (tip) and vertices 1, 2 (control pair)
-    ax1.scatter(*initial[0, 0], color='red', s=120, marker='D', edgecolors='black', zorder=5, label='v0 (tip)')
-    ax1.scatter(*initial[0, 1], color='orange', s=120, marker='s', edgecolors='black', zorder=5, label='v1 (control)')
-    ax1.scatter(*initial[0, 2], color='orange', s=120, marker='s', edgecolors='black', zorder=5, label='v2 (control)')
-
     # Hole triangle
     tri = [0, 1, 2, 0]
     ax1.plot(hole_pts[tri, 0], hole_pts[tri, 1], hole_pts[tri, 2],
@@ -382,12 +375,6 @@ def visualize_initial_state(initial_branched, target, hole_pts, hole_center, hol
         if mask.any():
             ax2.plot(v[mask, 0], v[mask, 2], 'o-', color=branch_colors[bi], linewidth=2,
                      markersize=5, label=branch_labels[bi])
-    ax2.scatter(initial[0, 0, 0], initial[0, 0, 2], color='red', s=120, marker='D',
-                edgecolors='black', zorder=5, label='v0 (tip)')
-    ax2.scatter(initial[0, 1, 0], initial[0, 1, 2], color='orange', s=120, marker='s',
-                edgecolors='black', zorder=5, label='v1 (control)')
-    ax2.scatter(initial[0, 2, 0], initial[0, 2, 2], color='orange', s=120, marker='s',
-                edgecolors='black', zorder=5, label='v2 (control)')
     ax2.plot(hole_pts[tri, 0], hole_pts[tri, 2], 'g^-', linewidth=2, label='Hole')
     ax2.scatter(target[0], target[2], color='magenta', s=100, marker='x', zorder=5, label='Target')
 
@@ -428,7 +415,6 @@ def _run_warmup(deft_sim, initial_branched, parent_theta_clamp,
     """Run a warmup phase with all clamped vertices held static at initial positions.
     Returns the settled final state as (1, n_branch, max_vert, 3).
     """
-    print(f"\n--- Warmup: {WARMUP_STEPS} steps (static hold) to damp initial vibrations ---")
     batch = 1
     clamped_full = torch.zeros(batch, WARMUP_STEPS, N_BRANCH, N_PARENT, 3, dtype=torch.float64)
     # Hold all clamped vertices at their initial positions for every timestep
@@ -451,11 +437,6 @@ def _run_warmup(deft_sim, initial_branched, parent_theta_clamp,
             inference_1_batch=True
         )
     settled = pred[:, -1].detach().clone()  # (1, n_branch, max_vert, 3)
-    tip_before = initial_branched[0, 0, 0].numpy()
-    tip_after = settled[0, 0, 0].numpy()
-    print(f"  Tip before warmup: {tip_before}")
-    print(f"  Tip after warmup:  {tip_after}")
-    print(f"  Tip drift: {np.linalg.norm(tip_after - tip_before):.6f}")
     return settled
 
 
@@ -711,70 +692,6 @@ def visualize_result(optimized_traj, initial_branched, target_pt, hole_pts, flat
         plt.show()
 
 
-def animate_result(optimized_traj, initial_branched, target_pt, hole_pts,
-                   config_id, height_id, hole_side, save_path=None, skip=2):
-    """Animate the thread insertion."""
-    traj = optimized_traj[0].numpy()
-    target = target_pt
-
-    # Precompute fixed axis limits from full trajectory + hole + target
-    all_points = []
-    for t in range(traj.shape[0]):
-        for bi in range(traj.shape[1]):
-            v = traj[t, bi]
-            mask = np.any(v != 0, axis=-1)
-            if mask.any():
-                all_points.append(v[mask])
-    all_points.append(hole_pts)
-    all_points.append(np.array(target).reshape(1, 3))
-    all_points = np.concatenate(all_points, axis=0)
-    margin = 0.02
-    x_min, x_max = all_points[:, 0].min() - margin, all_points[:, 0].max() + margin
-    y_min, y_max = all_points[:, 1].min() - margin, all_points[:, 1].max() + margin
-    z_min, z_max = all_points[:, 2].min() - margin, all_points[:, 2].max() + margin
-
-    fig = plt.figure(figsize=(8, 6))
-    ax = fig.add_subplot(111, projection='3d')
-    colors = ['red', 'blue', 'green']
-
-    def update(frame):
-        ax.clear()
-        # Current BDLO
-        for bi, c in enumerate(colors):
-            v = traj[frame, bi]
-            mask = np.any(v != 0, axis=-1)
-            if mask.any():
-                ax.plot(v[mask, 0], v[mask, 1], v[mask, 2], 'o-', color=c, linewidth=2, markersize=4)
-        # Hole
-        tri = [0, 1, 2, 0]
-        ax.plot(hole_pts[tri, 0], hole_pts[tri, 1], hole_pts[tri, 2],
-                'g^-', linewidth=2, markersize=8)
-        # Target
-        ax.scatter(*target, color='magenta', s=100, marker='x', linewidths=3)
-        # Tip trace up to current frame
-        tips = traj[:frame+1, 0, 0]
-        ax.plot(tips[:, 0], tips[:, 1], tips[:, 2], '--', color='orange', alpha=0.5)
-
-        # Fixed axis limits
-        ax.set_xlim(x_min, x_max)
-        ax.set_ylim(y_min, y_max)
-        ax.set_zlim(z_min, z_max)
-
-        ax.set_title(f'Config {config_id}->H{height_id}{hole_side} Frame {frame}/{traj.shape[0]}')
-        ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
-        ax.view_init(elev=20, azim=-60)
-
-    frames = range(0, traj.shape[0], skip)
-    anim = FuncAnimation(fig, update, frames=frames, interval=50)
-
-    if save_path:
-        anim.save(save_path, writer='ffmpeg', fps=20)
-        print(f"Saved animation to {save_path}")
-    else:
-        plt.show()
-    return anim
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Thread insertion optimization')
     parser.add_argument('--config', type=int, default=1, help='Mocap config ID (1-5)')
@@ -805,11 +722,6 @@ if __name__ == "__main__":
     fig_path = os.path.join(vis_dir, f'{tag}.png')
     visualize_result(optimized_traj, initial_branched, target_pt, hole_pts, flat_pts,
                      args.config, args.height, args.hole, save_path=fig_path)
-    
-    # Save animation
-    anim_path = os.path.join(vis_dir, f'{tag}.mp4')
-    animate_result(optimized_traj, initial_branched, target_pt, hole_pts,
-                   args.config, args.height, args.hole, save_path=anim_path)
 
     # Save controlled vertex's trajectory as pkl file
     out_dir = os.path.join(os.path.dirname(__file__), 'trajectories', 'parent_branch_thread_insertion')
