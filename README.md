@@ -21,10 +21,10 @@ All authors are affiliated with the Robotics department and the department of Me
 
 ## Modeling Results Visualization
 <p align="center">
-  <img height="530" width="1200" src="assets/modeling_demo.png"/>
+  <img height="530" width="1200" src="assets/modeling1.png"/>
 </p>
 <p align="center">
-  <img height="530" width="1200" src="assets/modeling_demo2.png"/>
+  <img height="530" width="1200" src="assets/modeling2.png"/>
 </p>
 Visualization of the predicted trajectories for BDLO 1 under two manipulation scenarios, using DEFT, a DEFT ablation that leaves out the constraint described in Theorem 4, and Tree-LSTM. The ground-truth initial position of the vertices are colored in blue, the ground-truth final position of the vertices are colored in pink, and the gradient between these two colors is used to denote the ground truth location over time. 
 The predicted vertices are colored as green circles (DEFT), orange circles (DEFT ablation), and light red circles (Tree-LSTM), respectively.
