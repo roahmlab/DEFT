@@ -26,11 +26,12 @@ All authors are affiliated with the Robotics department and the department of Me
 <p align="center">
   <img height="530" width="1200" src="assets/modeling2.png"/>
 </p>
-Visualization of the predicted trajectories for BDLO 1 under two manipulation scenarios, using DEFT, a DEFT ablation that leaves out the constraint described in Theorem 4, and Tree-LSTM. The ground-truth initial position of the vertices are colored in blue, the ground-truth final position of the vertices are colored in pink, and the gradient between these two colors is used to denote the ground truth location over time. 
+Visualization of the predicted trajectories using DEFT, a DEFT ablation that leaves out the constraint described in Theorem 3, and Tree-LSTM. 
+The ground-truth initial position of the vertices are colored in blue, the ground-truth final position of the vertices are colored in pink, and the gradient between these two colors is used to denote the ground truth location over time. 
 The predicted vertices are colored as green circles (DEFT), orange circles (DEFT ablation), and light red circles (Tree-LSTM), respectively.
 A gradient is used for these predictions to depict the evolution of time, starting from dark and going to light.
-Note that the ground truth is only provided at t=0s and prediction is constructed until t=8s.
-The prediction is performed recursively, without requiring additional ground-truth data or perception inputs throughout the entire process.
+Note that the ground truth is only provided at t=0 s. 
+The prediction is performed recursively without requiring additional ground-truth data or perception inputs throughout the process.
 
 ## Dependencies
 Key dependencies include:
