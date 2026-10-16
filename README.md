@@ -1,23 +1,24 @@
 # DEFT: Differentiable Branched Discrete Elastic Rods for Modeling Furcated DLOs in Real-Time
 
-This repository contains the source code for the paper DEFT: Differentiable Branched Discrete Elastic Rods for Modeling Furcated DLOs in Real-Time.
+**Accepted to The International Journal of Robotics Research (IJRR), 2026.**
+
+[Project page](https://roahmlab.github.io/DEFT/) · [Paper (arXiv)](https://arxiv.org/abs/2502.15037) · [Video](https://roahmlab.github.io/DEFT/#video)
+
+This repository contains the source code and dataset for the paper DEFT: Differentiable Branched Discrete Elastic Rods for Modeling Furcated DLOs in Real-Time.
+
+**Authors:** Yizhou Chen (yizhouch@umich.edu), Felicia Sang\* (fsang@umich.edu), Shicheng Peng\* (shchpeng@umich.edu), Xiaoyue Wu\* (wxyluna@umich.edu), Yeheng Zong (yehengz@umich.edu), Yuzhen Chen (yuzhench@umich.edu), Anran Li (anranli@umich.edu), Bohao Zhang (jimzhang@umich.edu), and Ramanarayan Vasudevan (ramv@umich.edu).
+\* These authors contributed equally.
+
+All authors are affiliated with the Department of Robotics, University of Michigan, 2505 Hayward Street, Ann Arbor, Michigan, USA.
 
 ## Introduction
 <p align="center">
   <img height="426" width="1200" src="assets/title_page.png"/>
 </p>
 
-The figures above illustrate how DEFT can be used to autonomously perform a wire insertion task.
-**Left:** The system first plans a shape-matching motion, transitioning the BDLO from its initial configuration to the target shape (contoured with yellow), which serves as an intermediate waypoint.
-**Right:** Starting from the intermediate configuration, the system performs thread insertion, guiding the BDLO into the target hole while also matching the target shape. Notably, DEFT predicts the shape of the wire recursively without relying on ground truth or perception data at any point in the process.
+DEFT can be used with a motion planner to manipulate branched cables autonomously. **Top:** inserting the tip of the parent branch into a target hole. **Bottom:** inserting the tip of a child branch, in a BDLO with a different topology, while only the parent branch is grasped. DEFT predicts the state of the wire recursively throughout, without ground-truth or perception data at any stage.
 
-**Contributions:** While existing research has made progress in modeling single-threaded Deformable Linear Objects (DLOs), extending these approaches to Branched Deformable Linear Objects (BDLOs) presents fundamental challenges. 
-The junction points in BDLOs create complex force interactions and strain propagation patterns that cannot be adequately captured by simply connecting multiple single-DLO models.
-To address these challenges, this paper presents Differentiable discrete branched Elastic rods for modeling Furcated DLOs in real-Time (DEFT), a novel framework that combines a differentiable physics-based model with a learning framework to: 1) accurately model BDLO dynamics, including dynamic propagation at junction points and grasping in the middle of a BDLO, 2) achieve efficient computation for real-time inference, and 3) enable planning to demonstrate dexterous BDLO manipulation. To the best of our knowledge, this is the first publicly available dataset and code for modeling BDLOs.
-
-**Authors:** Yizhou Chen (yizhouch@umich.edu),  Felicia Sang (fsang@umich.edu), Shicheng Peng (shchpeng@umich.edu), Xiaoyue Wu (wxyluna@umich.edu), Yeheng Zong (yehengz@umich.edu), Anran Li (anranli@umich.edu ), Yuzhen Chen (yuzhench@umich.edu), Julie Wu (jwuxx@umich.edu), Bohao Zhang (jimzhang@umich.edu) and Ram Vasudevan (ramv@umich.edu).
-
-All authors are affiliated with the Robotics department and the department of Mechanical Engineering of the University of Michigan, 2505 Hayward Street, Ann Arbor, Michigan, USA.
+**Abstract:** Autonomous wire harness assembly requires robots to manipulate complex branched cables with high precision and reliability. A key challenge is accurately predicting how branched cables deform during manipulation. Although well studied for single Deformable Linear Objects (DLOs), existing methods do not extend directly to Branched DLOs (BDLOs), whose junctions couple bending, twisting, and stretching across branches in ways that connecting multiple DLO models cannot capture. DEFT (Differentiable discrete branched Elastic rods for modeling Furcated DLOs in real-Time) combines a differentiable physics-based model with learning to 1) accurately model BDLO dynamics, including dynamic propagation at junctions and grasping in the middle of a BDLO, 2) achieve real-time inference, and 3) support planning for dexterous BDLO manipulation. DEFT introduces momentum-conserving junction constraints to capture cross-branch coupling, combines analytical gradients with branch-parallel computation for efficient parameter learning and inference, and uses a residual Graph Neural Network to reduce errors accumulated during long-horizon predictions. On six physical BDLOs with different topologies and material properties, the same formulation and residual-GNN architecture are applied without redesign. Over five-second recursive open-loop predictions, DEFT achieves RMSEs of 0.93–2.14 cm while running at over 100 Hz, and in real-world planning it succeeds in 36/40 shape-matching, 40/40 parent-branch insertion, and 16/20 child-branch insertion trials. To the best of our knowledge, this is the first publicly available dataset and code for modeling BDLOs.
 
 ## Modeling Results Visualization
 <p align="center">
@@ -134,14 +135,15 @@ python tests/child_branch_thread_insertion.py --kinova 2 --franka 1 --target 1
 - For BDLO 1 and BDLO 3, we record dynamic trajectory data when one robot grasps the middle of the BDLO while the other robot grasps one of its ends.
 
 ## Citation
-If you use DEFT in an academic work, please cite using the following BibTex entry:
-```
-@article{chen2025deft,
+If you use DEFT in an academic work, please cite:
+```bibtex
+@article{chen2026deft,
   title={DEFT: Differentiable Branched Discrete Elastic Rods for Modeling Furcated DLOs in Real-Time},
-  author={Chen, Yizhou and Wu, Xiaoyue and Zong, Yeheng and Chen, Yuzhen and Li, Anran and Zhang, Bohao and Vasudevan, Ram},
-  journal={arXiv preprint arXiv:2502.15037},
-  year={2025}
+  author={Chen, Yizhou and Sang, Felicia and Peng, Shicheng and Wu, Xiaoyue and Zong, Yeheng and Chen, Yuzhen and Li, Anran and Zhang, Bohao and Vasudevan, Ramanarayan},
+  journal={The International Journal of Robotics Research},
+  year={2026},
+  note={Accepted}
 }
 ```
 
-
+This project was developed in the [Robotics and Optimization for Analysis of Human Motion (ROAHM) Lab](http://www.roahmlab.com/) at the University of Michigan, Ann Arbor, with support from Ford Motor Company.
