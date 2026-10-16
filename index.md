@@ -129,6 +129,7 @@ Real-world planning success:
 | DEFORM<sup>+</sup> | 0/40 | 38/40 | 2/20 |
 | DEFT (ablation) | 0/40 | 38/40 | 2/20 |
 | **DEFT** | **36/40** | **40/40** | **16/20** |
+
 </div>
 
 ---
