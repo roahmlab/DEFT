@@ -54,7 +54,7 @@ links:
   - icon: youtube
     icon-library: simpleicons
     text: Video
-    url: "#video"
+    url: https://www.youtube.com/watch?v=mwT6pzcyO2E
 
 # End Front Matter
 ---
@@ -147,11 +147,10 @@ For dataset usage, please refer to `scripts/DEFT_train.py` in the [code reposito
 ---
 
 # Video
-<div class="fullwidth">
-<video controls="" width="100%" preload="metadata" poster="web_elements/title_page.png">
-    <source src="web_elements/DEFT_video.mp4" type="video/mp4">
-</video>
+<div class="fullwidth" style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;">
+<iframe src="https://www.youtube.com/embed/mwT6pzcyO2E" title="DEFT video" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
 </div>
+<p align="center"><a href="https://www.youtube.com/watch?v=mwT6pzcyO2E">Watch on YouTube</a> · <a href="web_elements/DEFT_video.mp4">Download MP4</a></p>
 
 <div markdown="1" class="content-block grey justify">
 
