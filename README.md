@@ -2,7 +2,7 @@
 
 **Accepted to The International Journal of Robotics Research (IJRR), 2026.**
 
-[Project page](https://roahmlab.github.io/DEFT/) · [Paper (arXiv)](https://arxiv.org/abs/2502.15037) · [Video](https://roahmlab.github.io/DEFT/#video)
+[Project page](https://roahmlab.github.io/DEFT/) · [Paper (arXiv)](https://arxiv.org/abs/2502.15037) · [Video](https://www.youtube.com/watch?v=mwT6pzcyO2E)
 
 This repository contains the source code and dataset for the paper DEFT: Differentiable Branched Discrete Elastic Rods for Modeling Furcated DLOs in Real-Time.
 
