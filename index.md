@@ -62,8 +62,6 @@ links:
 {% include sections/authors %}
 {% include sections/links %}
 
-<p align="center"><b>Accepted to The International Journal of Robotics Research (IJRR), 2026</b></p>
-
 ---
 
 # Abstract
