@@ -161,8 +161,7 @@ This project was developed in the [Robotics and Optimization for Analysis of Hum
   title={DEFT: Differentiable Branched Discrete Elastic Rods for Modeling Furcated DLOs in Real-Time},
   author={Chen, Yizhou and Sang, Felicia and Peng, Shicheng and Wu, Xiaoyue and Zong, Yeheng and Chen, Yuzhen and Li, Anran and Zhang, Bohao and Vasudevan, Ramanarayan},
   journal={The International Journal of Robotics Research},
-  year={2026},
-  note={Accepted}
+  year={2026}
 }
 ```
 </div>
