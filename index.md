@@ -157,11 +157,15 @@ For dataset usage, please refer to `scripts/DEFT_train.py` in the [code reposito
 This project was developed in the [Robotics and Optimization for Analysis of Human Motion (ROAHM) Lab](http://www.roahmlab.com/) at the University of Michigan, Ann Arbor, with support from Ford Motor Company.
 
 ```bibtex
-@article{chen2026deft,
-  title={DEFT: Differentiable Branched Discrete Elastic Rods for Modeling Furcated DLOs in Real-Time},
-  author={Chen, Yizhou and Sang, Felicia and Peng, Shicheng and Wu, Xiaoyue and Zong, Yeheng and Chen, Yuzhen and Li, Anran and Zhang, Bohao and Vasudevan, Ramanarayan},
-  journal={The International Journal of Robotics Research},
-  year={2026}
+@misc{chen2026deftdifferentiablebrancheddiscrete,
+      title={DEFT: Differentiable Branched Discrete Elastic Rods for Modeling Furcated DLOs in Real-Time}, 
+      author={Yizhou Chen and Felicia Sang and Shicheng Peng and Xiaoyue Wu and Yeheng Zong and Yuzhen Chen and Anran Li and Bohao Zhang and Ram Vasudevan},
+      year={2026},
+      eprint={2502.15037},
+      archivePrefix={arXiv},
+      primaryClass={cs.RO},
+      doi={https://doi.org/10.1177/02783649261503499},
+      url={https://arxiv.org/abs/2502.15037}, 
 }
 ```
 </div>
